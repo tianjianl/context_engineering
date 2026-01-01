@@ -10,6 +10,7 @@ import argparse
 import json
 from typing import List, Dict
 from pathlib import Path
+import torch
 from vllm import LLM, SamplingParams
 
 
@@ -267,7 +268,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen3-4B-Instruct-2507",
+        default="Qwen/Qwen3-4B-Instruct-2507",
         help="Model name or path to use for generation (default: Qwen3-4B-Instruct-2507)"
     )
     parser.add_argument(
@@ -320,22 +321,43 @@ def main():
     parser.add_argument(
         "--tensor_parallel_size",
         type=int,
-        default=1,
-        help="Number of GPUs to use for tensor parallelism (default: 1)"
+        default=None,
+        help="Number of GPUs to use for tensor parallelism (default: auto-detect all available GPUs)"
     )
 
     args = parser.parse_args()
+
+    # Detect available GPUs
+    num_gpus = torch.cuda.device_count()
+    print(f"\n{'='*80}")
+    print(f"GPU Detection")
+    print(f"{'='*80}")
+    print(f"Detected {num_gpus} GPU(s)")
+
+    # Set data parallelism size
+    if args.tensor_parallel_size is None:
+        # Auto-detect: use all available GPUs
+        tensor_parallel_size = num_gpus if num_gpus > 0 else 1
+        print(f"Auto-setting tensor_parallel_size = {tensor_parallel_size} (using all GPUs)")
+    else:
+        # Use user-specified value
+        tensor_parallel_size = args.tensor_parallel_size
+        print(f"Using user-specified tensor_parallel_size = {tensor_parallel_size}")
+        if tensor_parallel_size > num_gpus:
+            print(f"WARNING: Requested {tensor_parallel_size} GPUs but only {num_gpus} available")
+
+    print(f"{'='*80}\n")
 
     # Load input data
     print(f"Loading data from {args.input_file}...")
     data = load_jsonl(args.input_file)
     print(f"Loaded {len(data)} prompts")
 
-    # Initialize vLLM
-    print(f"Loading model {args.model}...")
+    # Initialize vLLM with data parallelism
+    print(f"Loading model {args.model} with tensor_parallel_size={tensor_parallel_size}...")
     llm = LLM(
         model=args.model,
-        tensor_parallel_size=args.tensor_parallel_size,
+        tensor_parallel_size=tensor_parallel_size,
         trust_remote_code=True
     )
 
