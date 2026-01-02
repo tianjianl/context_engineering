@@ -2,16 +2,54 @@
 """
 Context Refinement Script using vLLM
 
-This script reads prompts from a JSONL file, generates N tokens,
-then refines the partial generation using a context refinement prompt.
+This script supports multiple benchmarks (HMMT, IMOBench) and performs
+multi-round generation with context refinement.
 """
 
 import argparse
 import json
+import csv
 from typing import List, Dict
 from pathlib import Path
 import torch
 from vllm import LLM, SamplingParams
+import urllib.request
+
+
+# Dataset URLs
+IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
+
+
+def download_imobench(cache_dir: str) -> str:
+    """Download IMOBench (AnswerBench) CSV if not already cached."""
+    cache_path = Path(cache_dir) / "answerbench.csv"
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
+    if not cache_path.exists():
+        print(f"Downloading IMOBench from {IMOBENCH_URL}...")
+        urllib.request.urlretrieve(IMOBENCH_URL, cache_path)
+        print(f"Saved to {cache_path}")
+    else:
+        print(f"Loading IMOBench from {cache_path}")
+
+    return str(cache_path)
+
+
+def load_imobench(csv_path: str) -> List[Dict]:
+    """Load data from IMOBench (AnswerBench) CSV file."""
+    data = []
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            data.append({
+                "problem_id": row.get("Problem ID", ""),
+                "prompt": row.get("Problem", ""),
+                "answer": row.get("Short Answer", ""),
+                "category": row.get("Category", ""),
+                "subcategory": row.get("Subcategory", ""),
+                "source": row.get("Source", "")
+            })
+    return data
 
 
 def load_jsonl(file_path: str) -> List[Dict]:
@@ -63,27 +101,16 @@ def process_debug_mode(llm, data, initial_sampling_params, refinement_sampling_p
 
         # Track all rounds
         rounds_data = []
-        assistant_message_prefix = ""  # Accumulates all previous refined contexts
+        assistant_message_prefix = ""
 
-        # Perform multiple rounds of generation and refinement
         for round_num in range(args.rounds):
             print(f"\n{'#'*80}")
             print(f"ROUND {round_num + 1}/{args.rounds}")
             print(f"{'#'*80}")
 
-            # Stage 1: Generate N tokens using chat format
-            # User message is always the original prompt
-            # Assistant message contains the accumulated prefix from previous rounds
             if round_num == 0:
-                # First round: just the user prompt
                 prompt_text = original_prompt
             else:
-                # Subsequent rounds: user prompt + assistant prefix
-                messages = [
-                    {"role": "user", "content": original_prompt},
-                    {"role": "assistant", "content": assistant_message_prefix}
-                ]
-                # Format as chat continuation prompt
                 prompt_text = f"{original_prompt}\n\nAssistant: {assistant_message_prefix}"
 
             print(f"\nGenerating {args.num_tokens} tokens...")
@@ -98,17 +125,13 @@ def process_debug_mode(llm, data, initial_sampling_params, refinement_sampling_p
             print(current_round_generation)
             print(f"{'-'*80}")
 
-            # Stage 2: Refine based on --accumulate flag
-            # Determine what to pass to refinement
             if args.accumulate:
-                # Accumulate: assistant prefix + current generation
                 if round_num == 0:
                     context_to_refine = current_round_generation
                 else:
                     context_to_refine = assistant_message_prefix + current_round_generation
                 print(f"\nRefining ACCUMULATED context (prefix + current generation)...")
             else:
-                # No accumulation: only refine current round's generation
                 context_to_refine = current_round_generation
                 print(f"\nRefining CURRENT ROUND generation only...")
 
@@ -127,7 +150,6 @@ def process_debug_mode(llm, data, initial_sampling_params, refinement_sampling_p
             print(refined_context)
             print(f"{'-'*80}")
 
-            # Store this round's data
             round_data = {
                 "round": round_num + 1,
                 "current_round_generation": current_round_generation,
@@ -135,14 +157,11 @@ def process_debug_mode(llm, data, initial_sampling_params, refinement_sampling_p
             }
             rounds_data.append(round_data)
 
-            # Update assistant message prefix for next round
-            # The prefix grows with each refined context
             if round_num == 0:
                 assistant_message_prefix = refined_context
             else:
                 assistant_message_prefix = assistant_message_prefix + refined_context
 
-        # Store final results with all rounds
         result = {
             "original_prompt": original_prompt,
             "rounds": rounds_data,
@@ -163,32 +182,23 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
     print(f"BATCH MODE: Processing all prompts in batches ({args.rounds} rounds)")
     print("="*80)
 
-    # Extract prompts and filter valid items
-    valid_items = [item for item in data if "prompt" in item]
+    valid_items = [item for item in data if "prompt" in item and item["prompt"]]
     if len(valid_items) < len(data):
         print(f"Warning: Skipped {len(data) - len(valid_items)} items missing 'prompt' field")
 
     original_prompts = [item["prompt"] for item in valid_items]
 
-    # Store rounds data for all items
     all_rounds_data = [[] for _ in range(len(valid_items))]
-
-    # Track assistant message prefixes for each item (accumulated refined contexts)
     assistant_message_prefixes = ["" for _ in range(len(valid_items))]
 
-    # Perform multiple rounds
     for round_num in range(args.rounds):
         print(f"\n{'='*80}")
         print(f"ROUND {round_num + 1}/{args.rounds}")
         print(f"{'='*80}")
 
-        # Stage 1: Batch generate N tokens for all prompts
-        # Construct prompts based on round number
         if round_num == 0:
-            # First round: just the user prompts
             generation_prompts = original_prompts
         else:
-            # Subsequent rounds: user prompt + assistant prefix
             generation_prompts = [
                 f"{orig}\n\nAssistant: {prefix}"
                 for orig, prefix in zip(original_prompts, assistant_message_prefixes)
@@ -199,8 +209,6 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
         current_round_generations = [output.outputs[0].text for output in initial_outputs]
         print(f"    ✓ Completed initial generation")
 
-        # Stage 2: Create refinement prompts and batch process
-        # Determine what to pass to refinement based on --accumulate flag
         if args.accumulate:
             print(f"  Stage 2: Refining ACCUMULATED contexts (prefix + current generation)...")
             if round_num == 0:
@@ -222,7 +230,6 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
         refined_contexts = [output.outputs[0].text for output in refinement_outputs]
         print(f"    ✓ Completed refinement")
 
-        # Store round data
         for i, (current_gen, refined_ctx) in enumerate(zip(current_round_generations, refined_contexts)):
             round_data = {
                 "round": round_num + 1,
@@ -231,15 +238,12 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
             }
             all_rounds_data[i].append(round_data)
 
-        # Update assistant message prefixes for next round
-        # Each prefix accumulates the refined contexts
         for i in range(len(valid_items)):
             if round_num == 0:
                 assistant_message_prefixes[i] = refined_contexts[i]
             else:
                 assistant_message_prefixes[i] = assistant_message_prefixes[i] + refined_contexts[i]
 
-    # Combine final results
     for item, orig_prompt, rounds_data, full_message in zip(
         valid_items, original_prompts, all_rounds_data, assistant_message_prefixes
     ):
@@ -257,19 +261,32 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate and refine contexts using vLLM"
+        description="Generate and refine contexts using vLLM for multiple benchmarks"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["hmmt", "imobench"],
+        required=True,
+        help="Dataset to use: 'hmmt' or 'imobench'"
     )
     parser.add_argument(
         "--input_file",
         type=str,
-        required=True,
-        help="Input JSONL file containing prompts"
+        default=None,
+        help="Input JSONL file (required for hmmt, optional for imobench)"
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default="/scratch/dkhasha1/tli104/imobench",
+        help="Directory to cache downloaded datasets"
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-4B-Instruct-2507",
-        help="Model name or path to use for generation (default: Qwen3-4B-Instruct-2507)"
+        default="Qwen/Qwen3-4B",
+        help="Model name or path to use for generation"
     )
     parser.add_argument(
         "--num_tokens",
@@ -281,7 +298,7 @@ def main():
         "--output_file",
         type=str,
         default="output_refined.jsonl",
-        help="Output JSONL file for results (default: output_refined.jsonl)"
+        help="Output JSONL file for results"
     )
     parser.add_argument(
         "--rounds",
@@ -292,8 +309,7 @@ def main():
     parser.add_argument(
         "--accumulate",
         action="store_true",
-        help="Accumulate context across rounds (pass accumulated context to refinement). "
-             "If not set, only the newly generated tokens are refined each round."
+        help="Accumulate context across rounds"
     )
     parser.add_argument(
         "--debug",
@@ -322,10 +338,14 @@ def main():
         "--tensor_parallel_size",
         type=int,
         default=None,
-        help="Number of GPUs to use for tensor parallelism (default: auto-detect all available GPUs)"
+        help="Number of GPUs to use for tensor parallelism"
     )
 
     args = parser.parse_args()
+
+    # Validate arguments based on dataset
+    if args.dataset == "hmmt" and args.input_file is None:
+        parser.error("--input_file is required when using --dataset hmmt")
 
     # Detect available GPUs
     num_gpus = torch.cuda.device_count()
@@ -334,26 +354,35 @@ def main():
     print(f"{'='*80}")
     print(f"Detected {num_gpus} GPU(s)")
 
-    # Set data parallelism size
     if args.tensor_parallel_size is None:
-        # Auto-detect: use all available GPUs
         tensor_parallel_size = num_gpus if num_gpus > 0 else 1
-        print(f"Auto-setting tensor_parallel_size = {tensor_parallel_size} (using all GPUs)")
+        print(f"Auto-setting tensor_parallel_size = {tensor_parallel_size}")
     else:
-        # Use user-specified value
         tensor_parallel_size = args.tensor_parallel_size
         print(f"Using user-specified tensor_parallel_size = {tensor_parallel_size}")
-        if tensor_parallel_size > num_gpus:
-            print(f"WARNING: Requested {tensor_parallel_size} GPUs but only {num_gpus} available")
 
     print(f"{'='*80}\n")
 
-    # Load input data
-    print(f"Loading data from {args.input_file}...")
-    data = load_jsonl(args.input_file)
-    print(f"Loaded {len(data)} prompts")
+    # Load input data based on dataset
+    print(f"\n{'='*80}")
+    print(f"Loading Dataset: {args.dataset.upper()}")
+    print(f"{'='*80}")
 
-    # Initialize vLLM with data parallelism
+    if args.dataset == "imobench":
+        if args.input_file:
+            print(f"Loading IMOBench from custom file: {args.input_file}...")
+            data = load_jsonl(args.input_file)
+        else:
+            csv_path = download_imobench(args.cache_dir)
+            print(f"Loading IMOBench from {csv_path}...")
+            data = load_imobench(csv_path)
+    elif args.dataset == "hmmt":
+        print(f"Loading HMMT from {args.input_file}...")
+        data = load_jsonl(args.input_file)
+
+    print(f"Loaded {len(data)} problems")
+
+    # Initialize vLLM
     print(f"Loading model {args.model} with tensor_parallel_size={tensor_parallel_size}...")
     llm = LLM(
         model=args.model,
@@ -361,14 +390,13 @@ def main():
         trust_remote_code=True
     )
 
-    # Sampling parameters for initial generation
+    # Sampling parameters
     initial_sampling_params = SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.num_tokens
     )
 
-    # Sampling parameters for refinement
     refinement_sampling_params = SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
@@ -387,12 +415,13 @@ def main():
 
     # Save results
     print(f"\nSaving results to {args.output_file}...")
+    Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output_file, 'w', encoding='utf-8') as f:
         for result in results:
             f.write(json.dumps(result, ensure_ascii=False) + '\n')
 
     print(f"\n{'='*80}")
-    print(f"Done! Processed {len(results)} prompts.")
+    print(f"Done! Processed {len(results)} problems.")
     print(f"Results saved to {args.output_file}")
     print(f"{'='*80}")
 
