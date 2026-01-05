@@ -75,9 +75,31 @@ def verify_answer(gold_answer: str, generated_text: str, verbose: bool = False) 
         return False, f"error: {str(e)[:50]}"
 
 
+def get_text_from_sample(sample: Dict) -> Tuple[str, str]:
+    """Extract generated text from a sample dict. Returns (text, source_name)."""
+    text_sources = [
+        ("full_assistant_message", sample.get("full_assistant_message", "")),
+        ("final_refined_context", sample.get("final_refined_context", "")),
+    ]
+
+    rounds = sample.get("rounds", [])
+    if rounds:
+        last_round = rounds[-1]
+        text_sources.append(
+            ("last_round_generation", last_round.get("current_round_generation", ""))
+        )
+
+    for source_name, text in text_sources:
+        if text and text.strip():
+            return text, source_name
+
+    return "", None
+
+
 def verify_file(file_path: str, verbose: bool = False) -> Dict:
     """
     Verify all solutions in a JSONL file.
+    Supports multi-sample format: averages correctness across samples per question.
     Returns statistics dictionary.
     """
     data = load_jsonl(file_path)
@@ -87,79 +109,157 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
         "correct": 0,
         "incorrect": 0,
         "parse_failed": 0,
+        "avg_accuracy": 0.0,
         "status_counts": defaultdict(int),
-        "by_problem_type": defaultdict(lambda: {"correct": 0, "total": 0}),
+        "by_problem_type": defaultdict(lambda: {"correct": 0, "total": 0, "avg_accuracy": 0.0}),
         "details": []
     }
+
+    total_avg_correct = 0.0
 
     for idx, item in enumerate(data):
         gold_answer = item.get("answer", "")
         problem_idx = item.get("problem_idx", idx)
         problem_types = item.get("problem_type", ["Unknown"])
 
-        # Get generated text - try multiple sources
-        generated_text = ""
-        source_used = None
+        # Check if this is multi-sample format
+        samples = item.get("samples", None)
 
-        # Priority order for text sources
-        text_sources = [
-            ("full_assistant_message", item.get("full_assistant_message", "")),
-            ("final_refined_context", item.get("final_refined_context", "")),
-        ]
+        if samples is not None:
+            # Multi-sample format: verify each sample and average
+            num_samples = len(samples)
+            sample_results = []
+            correct_count = 0
 
-        # Also check the last round's generation
-        rounds = item.get("rounds", [])
-        if rounds:
-            last_round = rounds[-1]
-            text_sources.append(
-                ("last_round_generation", last_round.get("current_round_generation", ""))
-            )
+            for s_idx, sample in enumerate(samples):
+                generated_text, source_used = get_text_from_sample(sample)
 
-        # Use the first non-empty source
-        for source_name, text in text_sources:
-            if text and text.strip():
-                generated_text = text
-                source_used = source_name
-                break
+                if not generated_text:
+                    is_correct = False
+                    status = "no_text"
+                elif not gold_answer:
+                    is_correct = False
+                    status = "no_gold"
+                else:
+                    is_correct, status = verify_answer(gold_answer, generated_text, verbose)
 
-        if not generated_text:
-            is_correct = False
-            status = "no_text"
-        elif not gold_answer:
-            is_correct = False
-            status = "no_gold"
+                if is_correct:
+                    correct_count += 1
+
+                sample_results.append({
+                    "sample_idx": s_idx,
+                    "is_correct": is_correct,
+                    "status": status,
+                    "source": source_used
+                })
+
+            # Calculate average accuracy for this question
+            avg_correct = correct_count / num_samples if num_samples > 0 else 0.0
+            total_avg_correct += avg_correct
+
+            # For stats, count as correct if majority is correct (>50%)
+            is_question_correct = avg_correct > 0.5
+
+            if is_question_correct:
+                stats["correct"] += 1
+            else:
+                stats["incorrect"] += 1
+
+            # Track by problem type
+            for ptype in problem_types:
+                stats["by_problem_type"][ptype]["total"] += 1
+                stats["by_problem_type"][ptype]["avg_accuracy"] += avg_correct
+                if is_question_correct:
+                    stats["by_problem_type"][ptype]["correct"] += 1
+
+            detail = {
+                "problem_idx": problem_idx,
+                "gold_answer": gold_answer,
+                "num_samples": num_samples,
+                "correct_count": correct_count,
+                "avg_accuracy": avg_correct,
+                "is_majority_correct": is_question_correct,
+                "sample_results": sample_results,
+                "problem_types": problem_types
+            }
+            stats["details"].append(detail)
+
+            if verbose:
+                status_str = f"{correct_count}/{num_samples} correct ({avg_correct*100:.1f}%)"
+                print(f"[{problem_idx}] {status_str} | Gold: {gold_answer}")
+
         else:
-            is_correct, status = verify_answer(gold_answer, generated_text, verbose)
+            # Single-sample format (legacy): use old behavior
+            generated_text = ""
+            source_used = None
 
-        # Update stats
-        if is_correct:
-            stats["correct"] += 1
-        elif status in ["gold_parse_failed", "answer_parse_failed", "no_text", "no_gold"]:
-            stats["parse_failed"] += 1
-        else:
-            stats["incorrect"] += 1
+            text_sources = [
+                ("full_assistant_message", item.get("full_assistant_message", "")),
+                ("final_refined_context", item.get("final_refined_context", "")),
+            ]
 
-        stats["status_counts"][status] += 1
+            rounds = item.get("rounds", [])
+            if rounds:
+                last_round = rounds[-1]
+                text_sources.append(
+                    ("last_round_generation", last_round.get("current_round_generation", ""))
+                )
 
-        # Track by problem type
-        for ptype in problem_types:
-            stats["by_problem_type"][ptype]["total"] += 1
+            for source_name, text in text_sources:
+                if text and text.strip():
+                    generated_text = text
+                    source_used = source_name
+                    break
+
+            if not generated_text:
+                is_correct = False
+                status = "no_text"
+            elif not gold_answer:
+                is_correct = False
+                status = "no_gold"
+            else:
+                is_correct, status = verify_answer(gold_answer, generated_text, verbose)
+
             if is_correct:
-                stats["by_problem_type"][ptype]["correct"] += 1
+                stats["correct"] += 1
+                total_avg_correct += 1.0
+            elif status in ["gold_parse_failed", "answer_parse_failed", "no_text", "no_gold"]:
+                stats["parse_failed"] += 1
+            else:
+                stats["incorrect"] += 1
 
-        detail = {
-            "problem_idx": problem_idx,
-            "gold_answer": gold_answer,
-            "is_correct": is_correct,
-            "status": status,
-            "source": source_used,
-            "problem_types": problem_types
-        }
-        stats["details"].append(detail)
+            stats["status_counts"][status] += 1
 
-        if verbose:
-            status_str = "CORRECT" if is_correct else "WRONG"
-            print(f"[{problem_idx}] {status_str} | Gold: {gold_answer} | Status: {status}")
+            for ptype in problem_types:
+                stats["by_problem_type"][ptype]["total"] += 1
+                if is_correct:
+                    stats["by_problem_type"][ptype]["correct"] += 1
+                    stats["by_problem_type"][ptype]["avg_accuracy"] += 1.0
+
+            detail = {
+                "problem_idx": problem_idx,
+                "gold_answer": gold_answer,
+                "is_correct": is_correct,
+                "status": status,
+                "source": source_used,
+                "problem_types": problem_types
+            }
+            stats["details"].append(detail)
+
+            if verbose:
+                status_str = "CORRECT" if is_correct else "WRONG"
+                print(f"[{problem_idx}] {status_str} | Gold: {gold_answer} | Status: {status}")
+
+    # Calculate overall average accuracy
+    stats["avg_accuracy"] = (total_avg_correct / len(data) * 100) if len(data) > 0 else 0.0
+
+    # Normalize by_problem_type avg_accuracy
+    for ptype in stats["by_problem_type"]:
+        total = stats["by_problem_type"][ptype]["total"]
+        if total > 0:
+            stats["by_problem_type"][ptype]["avg_accuracy"] = (
+                stats["by_problem_type"][ptype]["avg_accuracy"] / total * 100
+            )
 
     return stats
 
@@ -169,26 +269,30 @@ def print_summary(stats: Dict, file_name: str = ""):
     total = stats["total"]
     correct = stats["correct"]
     accuracy = (correct / total * 100) if total > 0 else 0
+    avg_accuracy = stats.get("avg_accuracy", accuracy)
 
     print(f"\n{'='*60}")
     if file_name:
         print(f"Results for: {file_name}")
     print(f"{'='*60}")
     print(f"Total problems:      {total}")
-    print(f"Correct:             {correct}")
+    print(f"Correct (majority):  {correct}")
     print(f"Incorrect:           {stats['incorrect']}")
     print(f"Parse failed:        {stats['parse_failed']}")
-    print(f"Accuracy:            {accuracy:.2f}%")
+    print(f"Majority accuracy:   {accuracy:.2f}%")
+    print(f"Average accuracy:    {avg_accuracy:.2f}%")
 
-    print(f"\nStatus breakdown:")
-    for status, count in sorted(stats["status_counts"].items()):
-        print(f"  {status}: {count}")
+    if stats["status_counts"]:
+        print(f"\nStatus breakdown:")
+        for status, count in sorted(stats["status_counts"].items()):
+            print(f"  {status}: {count}")
 
     if stats["by_problem_type"]:
         print(f"\nAccuracy by problem type:")
         for ptype, pstats in sorted(stats["by_problem_type"].items()):
             pt_acc = (pstats["correct"] / pstats["total"] * 100) if pstats["total"] > 0 else 0
-            print(f"  {ptype}: {pstats['correct']}/{pstats['total']} ({pt_acc:.1f}%)")
+            pt_avg = pstats.get("avg_accuracy", pt_acc)
+            print(f"  {ptype}: {pstats['correct']}/{pstats['total']} (maj: {pt_acc:.1f}%, avg: {pt_avg:.1f}%)")
 
     print(f"{'='*60}\n")
 

@@ -175,11 +175,12 @@ def process_debug_mode(llm, data, initial_sampling_params, refinement_sampling_p
 
 
 def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_params, args):
-    """Process prompts in batches for efficiency."""
+    """Process prompts in batches for efficiency with multiple samples per question."""
     results = []
+    num_samples = args.num_samples
 
     print("\n" + "="*80)
-    print(f"BATCH MODE: Processing all prompts in batches ({args.rounds} rounds)")
+    print(f"BATCH MODE: Processing all prompts in batches ({args.rounds} rounds, {num_samples} samples each)")
     print("="*80)
 
     valid_items = [item for item in data if "prompt" in item and item["prompt"]]
@@ -188,8 +189,9 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
 
     original_prompts = [item["prompt"] for item in valid_items]
 
-    all_rounds_data = [[] for _ in range(len(valid_items))]
-    assistant_message_prefixes = ["" for _ in range(len(valid_items))]
+    # Track data for each sample: [question_idx][sample_idx]
+    all_samples_rounds_data = [[[] for _ in range(num_samples)] for _ in range(len(valid_items))]
+    all_samples_prefixes = [["" for _ in range(num_samples)] for _ in range(len(valid_items))]
 
     for round_num in range(args.rounds):
         print(f"\n{'='*80}")
@@ -197,61 +199,110 @@ def process_batch_mode(llm, data, initial_sampling_params, refinement_sampling_p
         print(f"{'='*80}")
 
         if round_num == 0:
+            # First round: generate n samples per prompt
             generation_prompts = original_prompts
-        else:
-            generation_prompts = [
-                f"{orig}\n\nAssistant: {prefix}"
-                for orig, prefix in zip(original_prompts, assistant_message_prefixes)
-            ]
+            print(f"  Stage 1: Generating {args.num_tokens} tokens x {num_samples} samples for {len(generation_prompts)} prompts...")
+            initial_outputs = llm.generate(generation_prompts, initial_sampling_params)
 
-        print(f"  Stage 1: Generating {args.num_tokens} tokens for {len(generation_prompts)} prompts...")
-        initial_outputs = llm.generate(generation_prompts, initial_sampling_params)
-        current_round_generations = [output.outputs[0].text for output in initial_outputs]
+            # Extract all samples: initial_outputs[question_idx].outputs[sample_idx]
+            current_round_generations = [
+                [output.outputs[s].text for s in range(num_samples)]
+                for output in initial_outputs
+            ]
+        else:
+            # Subsequent rounds: need to generate separately for each sample path
+            # Flatten all prompts (question x sample combinations)
+            flat_prompts = []
+            for q_idx, orig in enumerate(original_prompts):
+                for s_idx in range(num_samples):
+                    prefix = all_samples_prefixes[q_idx][s_idx]
+                    flat_prompts.append(f"{orig}\n\nAssistant: {prefix}")
+
+            print(f"  Stage 1: Generating {args.num_tokens} tokens for {len(flat_prompts)} prompt-sample combinations...")
+            # Use n=1 for subsequent rounds since we have separate prompts per sample
+            subsequent_sampling_params = SamplingParams(
+                temperature=initial_sampling_params.temperature,
+                top_p=initial_sampling_params.top_p,
+                top_k=initial_sampling_params.top_k,
+                max_tokens=initial_sampling_params.max_tokens,
+                n=1
+            )
+            initial_outputs = llm.generate(flat_prompts, subsequent_sampling_params)
+
+            # Reshape back to [question][sample]
+            current_round_generations = []
+            idx = 0
+            for q_idx in range(len(valid_items)):
+                sample_gens = []
+                for s_idx in range(num_samples):
+                    sample_gens.append(initial_outputs[idx].outputs[0].text)
+                    idx += 1
+                current_round_generations.append(sample_gens)
+
         print(f"    ✓ Completed initial generation")
 
-        if args.accumulate:
-            print(f"  Stage 2: Refining ACCUMULATED contexts (prefix + current generation)...")
-            if round_num == 0:
-                contexts_to_refine = current_round_generations
-            else:
-                contexts_to_refine = [
-                    prefix + current_gen
-                    for prefix, current_gen in zip(assistant_message_prefixes, current_round_generations)
-                ]
-        else:
-            print(f"  Stage 2: Refining CURRENT ROUND generations only...")
-            contexts_to_refine = current_round_generations
+        # Refinement: flatten all contexts and refine in batch
+        flat_refinement_prompts = []
+        for q_idx, orig in enumerate(original_prompts):
+            for s_idx in range(num_samples):
+                current_gen = current_round_generations[q_idx][s_idx]
+                if args.accumulate:
+                    if round_num == 0:
+                        context_to_refine = current_gen
+                    else:
+                        context_to_refine = all_samples_prefixes[q_idx][s_idx] + current_gen
+                else:
+                    context_to_refine = current_gen
+                flat_refinement_prompts.append(create_refinement_prompt(orig, context_to_refine))
 
-        refinement_prompts = [
-            create_refinement_prompt(orig, context)
-            for orig, context in zip(original_prompts, contexts_to_refine)
-        ]
-        refinement_outputs = llm.generate(refinement_prompts, refinement_sampling_params)
-        refined_contexts = [output.outputs[0].text for output in refinement_outputs]
+        if args.accumulate:
+            print(f"  Stage 2: Refining ACCUMULATED contexts...")
+        else:
+            print(f"  Stage 2: Refining CURRENT ROUND generations...")
+
+        refinement_outputs = llm.generate(flat_refinement_prompts, refinement_sampling_params)
         print(f"    ✓ Completed refinement")
 
-        for i, (current_gen, refined_ctx) in enumerate(zip(current_round_generations, refined_contexts)):
-            round_data = {
-                "round": round_num + 1,
-                "current_round_generation": current_gen,
-                "refined_context": refined_ctx
+        # Reshape and store results
+        idx = 0
+        for q_idx in range(len(valid_items)):
+            for s_idx in range(num_samples):
+                current_gen = current_round_generations[q_idx][s_idx]
+                refined_ctx = refinement_outputs[idx].outputs[0].text
+
+                round_data = {
+                    "round": round_num + 1,
+                    "current_round_generation": current_gen,
+                    "refined_context": refined_ctx
+                }
+                all_samples_rounds_data[q_idx][s_idx].append(round_data)
+
+                # Update prefix for next round
+                if round_num == 0:
+                    all_samples_prefixes[q_idx][s_idx] = refined_ctx
+                else:
+                    all_samples_prefixes[q_idx][s_idx] = all_samples_prefixes[q_idx][s_idx] + refined_ctx
+
+                idx += 1
+
+    # Build results with all samples
+    for q_idx, (item, orig_prompt) in enumerate(zip(valid_items, original_prompts)):
+        samples = []
+        for s_idx in range(num_samples):
+            rounds_data = all_samples_rounds_data[q_idx][s_idx]
+            full_message = all_samples_prefixes[q_idx][s_idx]
+            sample_result = {
+                "sample_idx": s_idx,
+                "rounds": rounds_data,
+                "final_refined_context": rounds_data[-1]["refined_context"],
+                "full_assistant_message": full_message
             }
-            all_rounds_data[i].append(round_data)
+            samples.append(sample_result)
 
-        for i in range(len(valid_items)):
-            if round_num == 0:
-                assistant_message_prefixes[i] = refined_contexts[i]
-            else:
-                assistant_message_prefixes[i] = assistant_message_prefixes[i] + refined_contexts[i]
-
-    for item, orig_prompt, rounds_data, full_message in zip(
-        valid_items, original_prompts, all_rounds_data, assistant_message_prefixes
-    ):
         result = {
             "original_prompt": orig_prompt,
-            "rounds": rounds_data,
-            "final_refined_context": rounds_data[-1]["refined_context"],
-            "full_assistant_message": full_message,
+            "num_samples": num_samples,
+            "samples": samples,
             **{k: v for k, v in item.items() if k != "prompt"}
         }
         results.append(result)
@@ -317,6 +368,12 @@ def main():
         help="Enable debug mode with verbose output (slower, processes one at a time)"
     )
     parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=1,
+        help="Number of samples to generate per question (default: 1)"
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=0.7,
@@ -327,6 +384,12 @@ def main():
         type=float,
         default=0.9,
         help="Top-p sampling parameter (default: 0.9)"
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=-1,
+        help="Top-k sampling parameter (default: -1, disabled)"
     )
     parser.add_argument(
         "--max_refinement_tokens",
@@ -394,12 +457,15 @@ def main():
     initial_sampling_params = SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
-        max_tokens=args.num_tokens
+        top_k=args.top_k,
+        max_tokens=args.num_tokens,
+        n=args.num_samples  # Generate multiple samples per question
     )
 
     refinement_sampling_params = SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
         max_tokens=args.max_refinement_tokens
     )
 
