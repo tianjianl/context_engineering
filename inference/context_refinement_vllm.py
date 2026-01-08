@@ -21,7 +21,7 @@ import urllib.request
 IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
 
 
-def apply_chat_template(tokenizer, prompt: str, add_generation_prompt: bool = True) -> str:
+def apply_chat_template(tokenizer, prompt: str, add_generation_prompt: bool = False) -> str:
     """Apply chat template to format prompt for instruct models."""
     messages = [{"role": "user", "content": prompt}]
     return tokenizer.apply_chat_template(
@@ -135,7 +135,7 @@ def process_debug_mode(llm, tokenizer, data, initial_sampling_params, refinement
             print(f"{'#'*80}")
 
             if round_num == 0:
-                prompt_text = apply_chat_template(tokenizer, original_prompt)
+                prompt_text = apply_chat_template(tokenizer, original_prompt, add_generation_prompt=True)
             else:
                 prompt_text = apply_chat_template_with_prefix(tokenizer, original_prompt, assistant_message_prefix)
 
@@ -162,7 +162,7 @@ def process_debug_mode(llm, tokenizer, data, initial_sampling_params, refinement
                 print(f"\nRefining CURRENT ROUND generation only...")
 
             refinement_prompt_raw = create_refinement_prompt(original_prompt, context_to_refine)
-            refinement_prompt = apply_chat_template(tokenizer, refinement_prompt_raw)
+            refinement_prompt = apply_chat_template(tokenizer, refinement_prompt_raw, add_generation_prompt=True)
 
             print(f"\nREFINEMENT PROMPT:")
             print(f"{'-'*80}")
@@ -227,7 +227,7 @@ def process_batch_mode(llm, tokenizer, data, initial_sampling_params, refinement
 
         if round_num == 0:
             # First round: generate n samples per prompt with chat template
-            generation_prompts = [apply_chat_template(tokenizer, p) for p in original_prompts]
+            generation_prompts = [apply_chat_template(tokenizer, p, add_generation_prompt=True) for p in original_prompts]
             print(f"  Stage 1: Generating {args.num_tokens} tokens x {num_samples} samples for {len(generation_prompts)} prompts...")
             initial_outputs = llm.generate(generation_prompts, initial_sampling_params)
 
@@ -281,7 +281,7 @@ def process_batch_mode(llm, tokenizer, data, initial_sampling_params, refinement
                 else:
                     context_to_refine = current_gen
                 refinement_prompt_raw = create_refinement_prompt(orig, context_to_refine)
-                flat_refinement_prompts.append(apply_chat_template(tokenizer, refinement_prompt_raw))
+                flat_refinement_prompts.append(apply_chat_template(tokenizer, refinement_prompt_raw, add_generation_prompt=True))
 
         if args.accumulate:
             print(f"  Stage 2: Refining ACCUMULATED contexts...")
