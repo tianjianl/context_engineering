@@ -9,13 +9,25 @@ the solutions against ground truth answers using the math-verify package.
 import argparse
 import json
 import math
+import os
+import sys
+import warnings
+import multiprocessing
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+# Default timeout for verification operations (in seconds)
+DEFAULT_VERIFY_TIMEOUT = 5
+
 try:
+    # Suppress math-verify import warnings
+    import logging
+    logging.getLogger().setLevel(logging.ERROR)
     from math_verify import parse, verify
-    from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig
     MATH_VERIFY_AVAILABLE = True
 except ImportError:
     MATH_VERIFY_AVAILABLE = False
@@ -34,49 +46,74 @@ def load_jsonl(file_path: str) -> List[Dict]:
     return data
 
 
-def verify_answer(gold_answer: str, generated_text: str, verbose: bool = False) -> Tuple[bool, str, Optional[str]]:
-    """
-    Verify if the generated text contains the correct answer.
-    Uses math-verify to parse and compare.
-    Returns (is_correct, status_message, parsed_answer_str).
-    """
+def _verify_single(args: Tuple[str, str]) -> Tuple[bool, str, Optional[str]]:
+    """Worker function for single verification."""
+    gold_answer, generated_text = args
     try:
-        # Parse gold answer - wrap in $ if not already LaTeX formatted
-        if not gold_answer.startswith('$'):
-            gold_text = f"${gold_answer}$"
-        else:
-            gold_text = gold_answer
-
+        # Parse gold answer
+        gold_text = f"${gold_answer}$" if not gold_answer.startswith('$') else gold_answer
         gold_parsed = parse(gold_text)
-
         if not gold_parsed:
-            if verbose:
-                print(f"    Could not parse gold answer: {gold_answer}")
-            return False, "gold_parse_failed", None
+            return (False, "gold_parse_failed", None)
 
-        # Parse the generated text - math-verify will extract the answer
+        # Parse generated text
         answer_parsed = parse(generated_text)
-
         if not answer_parsed:
-            if verbose:
-                print(f"    Could not extract answer from generated text")
-            return False, "answer_parse_failed", None
+            return (False, "answer_parse_failed", None)
 
-        # Convert parsed answer to string representation
         parsed_answer_str = str(answer_parsed) if answer_parsed else None
-
-        # Verify - order matters! gold first, then answer
         is_correct = verify(gold_parsed, answer_parsed)
-
-        if is_correct:
-            return True, "verified", parsed_answer_str
-        else:
-            return False, "incorrect", parsed_answer_str
+        return (is_correct, "verified" if is_correct else "incorrect", parsed_answer_str)
 
     except Exception as e:
-        if verbose:
-            print(f"    Verification error: {e}")
-        return False, f"error: {str(e)[:50]}", None
+        return (False, f"error: {str(e)[:50]}", None)
+
+
+def _pool_init():
+    """Initialize pool worker - suppress output."""
+    import warnings
+    import logging
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
+
+
+def verify_batch(items: List[Tuple[str, str]], timeout: float = DEFAULT_VERIFY_TIMEOUT, num_workers: int = 4) -> List[Tuple[bool, str, Optional[str]]]:
+    """
+    Verify a batch of (gold_answer, generated_text) pairs in parallel.
+    Uses multiprocessing.Pool with maxtasksperchild to handle stuck workers.
+    """
+    if not items:
+        return []
+
+    results = [(False, "timeout", None)] * len(items)
+
+    # Use pool with task limit to restart hung workers
+    with multiprocessing.Pool(num_workers, initializer=_pool_init, maxtasksperchild=10) as pool:
+        async_results = []
+        for i, item in enumerate(items):
+            ar = pool.apply_async(_verify_single, (item,))
+            async_results.append((i, ar))
+
+        for i, ar in async_results:
+            try:
+                results[i] = ar.get(timeout=timeout)
+            except multiprocessing.TimeoutError:
+                results[i] = (False, "timeout", None)
+            except Exception as e:
+                results[i] = (False, f"error: {str(e)[:30]}", None)
+
+    return results
+
+
+def verify_answer(gold_answer: str, generated_text: str, verbose: bool = False, timeout: float = DEFAULT_VERIFY_TIMEOUT) -> Tuple[bool, str, Optional[str]]:
+    """
+    Verify if the generated text contains the correct answer.
+    Single-item wrapper around verify_batch.
+    """
+    results = verify_batch([(gold_answer, generated_text)], timeout=timeout, num_workers=1)
+    return results[0] if results else (False, "error", None)
 
 
 def compute_pass_at_k(n: int, c: int, k: int) -> float:
@@ -124,6 +161,7 @@ def get_text_from_sample(sample: Dict) -> Tuple[str, str]:
     text_sources.extend([
         ("full_assistant_message", sample.get("full_assistant_message", "")),
         ("final_refined_context", sample.get("final_refined_context", "")),
+        ("generation", sample.get("generation", "")),
     ])
 
     for source_name, text in text_sources:
@@ -133,13 +171,14 @@ def get_text_from_sample(sample: Dict) -> Tuple[str, str]:
     return "", None
 
 
-def verify_file(file_path: str, verbose: bool = False) -> Dict:
+def verify_file(file_path: str, verbose: bool = False, timeout: float = DEFAULT_VERIFY_TIMEOUT, quiet: bool = False) -> Dict:
     """
-    Verify all solutions in a JSONL file.
+    Verify all solutions in a JSONL file using batch processing.
     Supports multi-sample format: averages correctness across samples per question.
     Returns statistics dictionary with pass@k metrics.
     """
     data = load_jsonl(file_path)
+    total_items = len(data)
 
     # Determine k values for pass@k based on sample counts
     max_samples = 1
@@ -148,7 +187,6 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
         if samples:
             max_samples = max(max_samples, len(samples))
 
-    # Common k values to compute
     k_values = [k for k in [1, 2, 4, 8, 16, 32, 64] if k <= max_samples]
 
     stats = {
@@ -156,6 +194,7 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
         "correct": 0,
         "incorrect": 0,
         "parse_failed": 0,
+        "timeout": 0,
         "avg_accuracy": 0.0,
         "pass_at_k": {k: 0.0 for k in k_values},
         "status_counts": defaultdict(int),
@@ -163,6 +202,51 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
         "details": []
     }
 
+    # Phase 1: Collect all verification tasks
+    if not quiet:
+        print("  Collecting samples...", end="", flush=True)
+
+    verify_tasks = []  # List of (gold, text) pairs
+    task_map = []  # Maps task index to (item_idx, sample_idx, source)
+
+    for idx, item in enumerate(data):
+        gold_answer = item.get("answer", "")
+        samples = item.get("samples", None)
+
+        if samples is not None:
+            for s_idx, sample in enumerate(samples):
+                generated_text, source_used = get_text_from_sample(sample)
+                if generated_text and gold_answer:
+                    verify_tasks.append((gold_answer, generated_text))
+                    task_map.append((idx, s_idx, source_used, True))  # True = needs verification
+                else:
+                    task_map.append((idx, s_idx, source_used, False))  # False = skip
+        else:
+            # Single-sample format
+            generated_text, source_used = get_text_from_sample(item)
+            if generated_text and gold_answer:
+                verify_tasks.append((gold_answer, generated_text))
+                task_map.append((idx, -1, source_used, True))
+            else:
+                task_map.append((idx, -1, source_used, False))
+
+    if not quiet:
+        print(f" {len(verify_tasks)} tasks")
+
+    # Phase 2: Batch verify all tasks
+    if not quiet:
+        print(f"  Verifying {len(verify_tasks)} samples...", end="", flush=True)
+
+    if verify_tasks:
+        verify_results = verify_batch(verify_tasks, timeout=timeout, num_workers=8)
+    else:
+        verify_results = []
+
+    if not quiet:
+        print(" done")
+
+    # Phase 3: Process results
+    result_iter = iter(verify_results)
     total_avg_correct = 0.0
     pass_at_k_sums = {k: 0.0 for k in k_values}
 
@@ -170,12 +254,9 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
         gold_answer = item.get("answer", "")
         problem_idx = item.get("problem_idx", idx)
         problem_types = item.get("problem_type", ["Unknown"])
-
-        # Check if this is multi-sample format
         samples = item.get("samples", None)
 
         if samples is not None:
-            # Multi-sample format: verify each sample and average
             num_samples = len(samples)
             sample_results = []
             correct_count = 0
@@ -185,15 +266,11 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
                 generated_text, source_used = get_text_from_sample(sample)
 
                 if not generated_text:
-                    is_correct = False
-                    status = "no_text"
-                    parsed_answer = None
+                    is_correct, status, parsed_answer = False, "no_text", None
                 elif not gold_answer:
-                    is_correct = False
-                    status = "no_gold"
-                    parsed_answer = None
+                    is_correct, status, parsed_answer = False, "no_gold", None
                 else:
-                    is_correct, status, parsed_answer = verify_answer(gold_answer, generated_text, verbose)
+                    is_correct, status, parsed_answer = next(result_iter)
 
                 if is_correct:
                     correct_count += 1
@@ -207,26 +284,21 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
                 })
                 parsed_solutions.append(parsed_answer)
 
-            # Calculate average accuracy for this question
             avg_correct = correct_count / num_samples if num_samples > 0 else 0.0
             total_avg_correct += avg_correct
 
-            # Calculate pass@k for this question
             question_pass_at_k = {}
             for k in k_values:
                 if k <= num_samples:
                     question_pass_at_k[k] = compute_pass_at_k(num_samples, correct_count, k)
                     pass_at_k_sums[k] += question_pass_at_k[k]
 
-            # For stats, count as correct if majority is correct (>50%)
             is_question_correct = avg_correct > 0.5
-
             if is_question_correct:
                 stats["correct"] += 1
             else:
                 stats["incorrect"] += 1
 
-            # Track by problem type
             for ptype in problem_types:
                 stats["by_problem_type"][ptype]["total"] += 1
                 stats["by_problem_type"][ptype]["avg_accuracy"] += avg_correct
@@ -250,52 +322,24 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
             }
             stats["details"].append(detail)
 
-            if verbose:
-                status_str = f"{correct_count}/{num_samples} correct ({avg_correct*100:.1f}%)"
-                pass_at_1 = question_pass_at_k.get(1, 0.0) * 100
-                print(f"[{problem_idx}] {status_str} pass@1={pass_at_1:.1f}% | Gold: {gold_answer}")
-                print(f"    Parsed solutions: {parsed_solutions[:5]}{'...' if len(parsed_solutions) > 5 else ''}")
-
         else:
-            # Single-sample format (legacy): use old behavior
-            generated_text = ""
-            source_used = None
-
-            text_sources = [
-                ("full_assistant_message", item.get("full_assistant_message", "")),
-                ("final_refined_context", item.get("final_refined_context", "")),
-            ]
-
-            rounds = item.get("rounds", [])
-            if rounds:
-                last_round = rounds[-1]
-                text_sources.append(
-                    ("last_round_generation", last_round.get("current_round_generation", ""))
-                )
-
-            for source_name, text in text_sources:
-                if text and text.strip():
-                    generated_text = text
-                    source_used = source_name
-                    break
+            # Single-sample format
+            generated_text, source_used = get_text_from_sample(item)
 
             if not generated_text:
-                is_correct = False
-                status = "no_text"
-                parsed_answer = None
+                is_correct, status, parsed_answer = False, "no_text", None
             elif not gold_answer:
-                is_correct = False
-                status = "no_gold"
-                parsed_answer = None
+                is_correct, status, parsed_answer = False, "no_gold", None
             else:
-                is_correct, status, parsed_answer = verify_answer(gold_answer, generated_text, verbose)
+                is_correct, status, parsed_answer = next(result_iter)
 
             if is_correct:
                 stats["correct"] += 1
                 total_avg_correct += 1.0
-                # For single sample, pass@k = 1 if correct, 0 if not
                 for k in k_values:
                     pass_at_k_sums[k] += 1.0
+            elif status == "timeout":
+                stats["timeout"] += 1
             elif status in ["gold_parse_failed", "answer_parse_failed", "no_text", "no_gold"]:
                 stats["parse_failed"] += 1
             else:
@@ -322,10 +366,6 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
             }
             stats["details"].append(detail)
 
-            if verbose:
-                status_str = "CORRECT" if is_correct else "WRONG"
-                print(f"[{problem_idx}] {status_str} | Gold: {gold_answer} | Parsed: {parsed_answer}")
-
     # Calculate overall average accuracy
     stats["avg_accuracy"] = (total_avg_correct / len(data) * 100) if len(data) > 0 else 0.0
 
@@ -348,45 +388,31 @@ def verify_file(file_path: str, verbose: bool = False) -> Dict:
     return stats
 
 
-def print_summary(stats: Dict, file_name: str = ""):
+def print_summary(stats: Dict, file_name: str = "", minimal: bool = True):
     """Print a summary of verification results."""
     total = stats["total"]
-    correct = stats["correct"]
-    accuracy = (correct / total * 100) if total > 0 else 0
-    avg_accuracy = stats.get("avg_accuracy", accuracy)
     pass_at_k = stats.get("pass_at_k", {})
+    timeout_count = stats.get("timeout", 0)
 
-    print(f"\n{'='*60}")
-    if file_name:
-        print(f"Results for: {file_name}")
-    print(f"{'='*60}")
-    print(f"Total problems:      {total}")
-    print(f"Correct (majority):  {correct}")
-    print(f"Incorrect:           {stats['incorrect']}")
-    print(f"Parse failed:        {stats['parse_failed']}")
-    print(f"Majority accuracy:   {accuracy:.2f}%")
-    print(f"Average accuracy:    {avg_accuracy:.2f}%")
+    if minimal:
+        # One-line summary
+        pass1 = pass_at_k.get(1, 0.0)
+        timeout_str = f" ({timeout_count} timeouts)" if timeout_count > 0 else ""
+        print(f"{file_name}: {total} problems, pass@1={pass1:.2f}%{timeout_str}")
+    else:
+        print(f"\n{'='*60}")
+        if file_name:
+            print(f"Results for: {file_name}")
+        print(f"{'='*60}")
+        print(f"Total problems: {total}")
 
-    if pass_at_k:
-        print(f"\nPass@k metrics:")
-        for k in sorted(pass_at_k.keys()):
-            print(f"  pass@{k}: {pass_at_k[k]:.2f}%")
+        if pass_at_k and 1 in pass_at_k:
+            print(f"pass@1: {pass_at_k[1]:.2f}%")
 
-    if stats["status_counts"]:
-        print(f"\nStatus breakdown:")
-        for status, count in sorted(stats["status_counts"].items()):
-            print(f"  {status}: {count}")
+        if timeout_count > 0:
+            print(f"Timeouts: {timeout_count}")
 
-    if stats["by_problem_type"]:
-        print(f"\nAccuracy by problem type:")
-        for ptype, pstats in sorted(stats["by_problem_type"].items()):
-            pt_acc = (pstats["correct"] / pstats["total"] * 100) if pstats["total"] > 0 else 0
-            pt_avg = pstats.get("avg_accuracy", pt_acc)
-            pt_pass_at_k = pstats.get("pass_at_k", {})
-            pass_at_1 = pt_pass_at_k.get(1, pt_acc) if pt_pass_at_k else pt_acc
-            print(f"  {ptype}: {pstats['correct']}/{pstats['total']} (avg: {pt_avg:.1f}%, pass@1: {pass_at_1:.1f}%)")
-
-    print(f"{'='*60}\n")
+        print(f"{'='*60}\n")
 
 
 def main():
@@ -417,6 +443,18 @@ def main():
         default="*.jsonl",
         help="Glob pattern for files when input is a directory (default: *.jsonl)"
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_VERIFY_TIMEOUT,
+        help=f"Timeout in seconds for each verification (default: {DEFAULT_VERIFY_TIMEOUT})"
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress progress output (only show final results)"
+    )
 
     args = parser.parse_args()
 
@@ -425,7 +463,8 @@ def main():
 
     if input_path.is_file():
         # Single file
-        stats = verify_file(str(input_path), args.verbose)
+        print(f"Verifying: {input_path.name}")
+        stats = verify_file(str(input_path), args.verbose, args.timeout, args.quiet)
         print_summary(stats, input_path.name)
         all_results[input_path.name] = stats
 
@@ -437,48 +476,22 @@ def main():
             print(f"No files matching '{args.pattern}' found in {input_path}")
             return
 
-        print(f"Found {len(files)} files to process")
-
-        aggregate_stats = {
-            "total": 0,
-            "correct": 0,
-            "incorrect": 0,
-            "parse_failed": 0,
-            "status_counts": defaultdict(int),
-            "by_problem_type": defaultdict(lambda: {"correct": 0, "total": 0})
-        }
+        print(f"Found {len(files)} files")
 
         for file_path in files:
-            stats = verify_file(str(file_path), args.verbose)
+            print(f"\nVerifying: {file_path.name}")
+            stats = verify_file(str(file_path), args.verbose, args.timeout, args.quiet)
             print_summary(stats, file_path.name)
             all_results[file_path.name] = stats
 
-            # Aggregate
-            aggregate_stats["total"] += stats["total"]
-            aggregate_stats["correct"] += stats["correct"]
-            aggregate_stats["incorrect"] += stats["incorrect"]
-            aggregate_stats["parse_failed"] += stats["parse_failed"]
-            for status, count in stats["status_counts"].items():
-                aggregate_stats["status_counts"][status] += count
-            for ptype, pstats in stats["by_problem_type"].items():
-                aggregate_stats["by_problem_type"][ptype]["total"] += pstats["total"]
-                aggregate_stats["by_problem_type"][ptype]["correct"] += pstats["correct"]
-
-        # Print aggregate summary
-        print("\n" + "#"*60)
-        print("AGGREGATE RESULTS")
-        print("#"*60)
-        print_summary(aggregate_stats, "All Files")
-
-        # Print comparison table
-        print("\nComparison Table:")
-        print("-"*60)
-        print(f"{'File':<30} {'Correct':<10} {'Total':<10} {'Accuracy':<10}")
-        print("-"*60)
-        for fname, fstats in sorted(all_results.items()):
-            acc = (fstats['correct'] / fstats['total'] * 100) if fstats['total'] > 0 else 0
-            print(f"{fname:<30} {fstats['correct']:<10} {fstats['total']:<10} {acc:.2f}%")
-        print("-"*60)
+        # Print comparison table only if multiple files
+        if len(files) > 1:
+            print(f"\n{'File':<45} {'N':<6} {'pass@1':<8}")
+            print("-" * 60)
+            for fname, fstats in sorted(all_results.items()):
+                pass_at_k = fstats.get("pass_at_k", {})
+                pass_at_1 = pass_at_k.get(1, 0.0)
+                print(f"{fname:<45} {fstats['total']:<6} {pass_at_1:.2f}%")
 
     else:
         print(f"Error: {input_path} does not exist")
