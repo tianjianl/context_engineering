@@ -163,6 +163,39 @@ IMPORTANT: Do not under any circumstances add any additional reasoning not conta
 {reasoning}"""
 
 
+def create_rc_verify_refinement_prompt(problem: str, existing_summary: str, reasoning: str) -> str:
+    """Create an RC-style refinement prompt that encourages verification and improvement.
+
+    Unlike the standard RC prompt which only summarizes, this prompt asks the model
+    to critically evaluate the previous attempt and suggest improvements.
+    """
+    return f"""You are given a maths problem and a candidate solution to it. You may also be given a summary of a previous candidate solution to the problem. If this is provided, you may assume that the current candidate solution was generated conditioned on the summary of the previous candidate solution.
+
+Your task is to write a critical summary that will help guide the next solution attempt. The summary should analyze what was tried and identify how to improve.
+
+The summary you generate should possess the following characteristics:
+- It should verify the correctness of key steps in the candidate solution. Flag any errors, incorrect assumptions, or unjustified leaps in logic.
+- It should note which approaches were tried and whether they seem promising or should be abandoned.
+- It should preserve important intermediate results and correct calculations from both the existing summary and the current solution.
+- If a final answer was reached, assess whether it is likely correct by checking it against the problem constraints or via an alternative method.
+- It should suggest concrete strategies for the next attempt. Some examples include:
+  - If the previous solution contains an error, explain where it went wrong and how to fix it.
+  - If the approach seems stuck, suggest an alternative problem-solving strategy.
+  - If the solution is incomplete, indicate what remains to be done and how to proceed.
+  - If the answer seems correct, suggest a way to verify or prove it differently.
+- It should be no more than two paragraphs long and written in paragraph form, without headers or subheaders.
+- It should be written in the first person, as if written by the person solving the problem.
+
+### PROBLEM
+{problem}
+
+### EXISTING SUMMARY
+{existing_summary}
+
+### LATEST CANDIDATE SOLUTION
+{reasoning}"""
+
+
 def save_intermediate_results(gpu_id: int, valid_items: List[Dict], original_prompts: List[str],
                                all_samples_rounds_data, all_samples_prefixes,
                                num_samples: int, round_num: int, output_file: str):
@@ -330,7 +363,12 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
         for q_idx, orig in enumerate(original_prompts):
             for s_idx in range(num_samples):
                 current_gen = current_round_generations[q_idx][s_idx]
-                if args.rc:
+                if args.rc_verify:
+                    existing_summary = all_samples_prefixes[q_idx][s_idx]
+                    refinement_prompt_raw = create_rc_verify_refinement_prompt(
+                        orig, existing_summary, current_gen
+                    )
+                elif args.rc:
                     existing_summary = all_samples_prefixes[q_idx][s_idx]
                     refinement_prompt_raw = create_rc_refinement_prompt(
                         orig, existing_summary, current_gen
@@ -381,7 +419,7 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                 all_samples_rounds_data[q_idx][s_idx].append(round_data)
 
                 # Update prefix for next round
-                if args.rc:
+                if args.rc or args.rc_verify:
                     # RC mode: summary replaces previous context (fixed-size window)
                     all_samples_prefixes[q_idx][s_idx] = refined_ctx
                 else:
@@ -537,6 +575,11 @@ def main():
         "--rc",
         action="store_true",
         help="Use RC-style incremental summarization: each round merges existing summary with latest reasoning into a fixed-size replacement summary (instead of appending refined context)"
+    )
+    parser.add_argument(
+        "--rc_verify",
+        action="store_true",
+        help="Use RC-style refinement with verification: like --rc but the summary critically evaluates the solution and suggests improvements for the next attempt"
     )
     parser.add_argument(
         "--strip_thinking_from_refinement",
