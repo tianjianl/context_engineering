@@ -1,2 +1,2 @@
-# context_engineering
-learning to summarize, refine context
+# Architect of Thought
+learning to summarize & refine intermediate generations.
