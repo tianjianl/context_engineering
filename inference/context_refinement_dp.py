@@ -163,6 +163,42 @@ IMPORTANT: Do not under any circumstances add any additional reasoning not conta
 {reasoning}"""
 
 
+def save_intermediate_results(gpu_id: int, valid_items: List[Dict], original_prompts: List[str],
+                               all_samples_rounds_data, all_samples_prefixes,
+                               num_samples: int, round_num: int, output_file: str):
+    """Save intermediate results for this GPU after a round completes."""
+    results = []
+    for q_idx, (item, orig_prompt) in enumerate(zip(valid_items, original_prompts)):
+        samples = []
+        for s_idx in range(num_samples):
+            rounds_data = all_samples_rounds_data[q_idx][s_idx]
+            full_message = all_samples_prefixes[q_idx][s_idx]
+            sample_result = {
+                "sample_idx": s_idx,
+                "rounds": rounds_data,
+                "final_refined_context": rounds_data[-1]["refined_context"],
+                "full_assistant_message": full_message
+            }
+            samples.append(sample_result)
+
+        result = {
+            "original_prompt": orig_prompt,
+            "num_samples": num_samples,
+            "samples": samples,
+            **{k: v for k, v in item.items() if k != "prompt"}
+        }
+        results.append(result)
+
+    # Save to intermediate file (one per GPU, overwritten each round)
+    output_path = Path(output_file)
+    intermediate_file = output_path.parent / f"{output_path.stem}_intermediate_gpu{gpu_id}.jsonl"
+    intermediate_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(intermediate_file, 'w', encoding='utf-8') as f:
+        for result in results:
+            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    print(f"[GPU {gpu_id}] Saved intermediate results after round {round_num + 1} to {intermediate_file}")
+
+
 def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Queue):
     """Worker process that runs on a single GPU."""
     # Set GPU visibility before importing vLLM
@@ -360,6 +396,13 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                         all_samples_prefixes[q_idx][s_idx] = all_samples_prefixes[q_idx][s_idx] + content_to_add
 
                 idx += 1
+
+        # Save intermediate results after each round
+        save_intermediate_results(
+            gpu_id, valid_items, original_prompts,
+            all_samples_rounds_data, all_samples_prefixes,
+            num_samples, round_num, args.output_file
+        )
 
     # Build results
     for q_idx, (item, orig_prompt) in enumerate(zip(valid_items, original_prompts)):
