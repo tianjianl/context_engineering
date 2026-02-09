@@ -53,10 +53,12 @@ def _pool_init():
     sys.stderr = open(os.devnull, 'w')
 
 
-def verify_batch(items: List[Tuple[str, str]], timeout: float = DEFAULT_TIMEOUT, num_workers: int = 8) -> List[Tuple[bool, str]]:
+def verify_batch(items: List[Tuple[str, str]], timeout: float = DEFAULT_TIMEOUT, num_workers: int = None) -> List[Tuple[bool, str]]:
     """Verify a batch of (gold_answer, generated_text) pairs in parallel."""
     if not items:
         return []
+    if num_workers is None:
+        num_workers = max(1, multiprocessing.cpu_count() - 1)
 
     results = [(False, "timeout")] * len(items)
 
@@ -107,20 +109,17 @@ def main():
 
     print(f"Loaded {len(data)} problems")
 
-    # Determine number of rounds
+    # Determine number of rounds (scan all samples)
     num_rounds = 0
     for item in data:
-        samples = item.get("samples", [])
-        if samples:
-            rounds = samples[0].get("rounds", [])
-            num_rounds = max(num_rounds, len(rounds))
-            break
+        for sample in item.get("samples", []):
+            num_rounds = max(num_rounds, len(sample.get("rounds", [])))
 
     print(f"Number of rounds: {num_rounds}")
 
     # Collect verification tasks for each round
-    round_tasks = {r: [] for r in range(num_rounds)}
-    round_task_map = {r: [] for r in range(num_rounds)}  # (problem_idx, sample_idx)
+    round_tasks = defaultdict(list)
+    round_task_map = defaultdict(list)  # (problem_idx, sample_idx)
 
     for prob_idx, item in enumerate(data):
         gold_answer = item.get("answer", "")

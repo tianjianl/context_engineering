@@ -171,12 +171,15 @@ def get_text_from_sample(sample: Dict) -> Tuple[str, str]:
     return "", None
 
 
-def verify_file(file_path: str, verbose: bool = False, timeout: float = DEFAULT_VERIFY_TIMEOUT, quiet: bool = False) -> Dict:
+def verify_file(file_path: str, verbose: bool = False, timeout: float = DEFAULT_VERIFY_TIMEOUT, quiet: bool = False, num_workers: int = None) -> Dict:
     """
     Verify all solutions in a JSONL file using batch processing.
     Supports multi-sample format: averages correctness across samples per question.
     Returns statistics dictionary with pass@k metrics.
     """
+    if num_workers is None:
+        num_workers = max(1, multiprocessing.cpu_count() - 1)
+
     data = load_jsonl(file_path)
     total_items = len(data)
 
@@ -238,7 +241,7 @@ def verify_file(file_path: str, verbose: bool = False, timeout: float = DEFAULT_
         print(f"  Verifying {len(verify_tasks)} samples...", end="", flush=True)
 
     if verify_tasks:
-        verify_results = verify_batch(verify_tasks, timeout=timeout, num_workers=8)
+        verify_results = verify_batch(verify_tasks, timeout=timeout, num_workers=num_workers)
     else:
         verify_results = []
 
@@ -455,8 +458,17 @@ def main():
         action="store_true",
         help="Suppress progress output (only show final results)"
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers (default: number of CPUs - 1)"
+    )
 
     args = parser.parse_args()
+
+    num_workers = args.num_workers if args.num_workers else max(1, multiprocessing.cpu_count() - 1)
+    print(f"Using {num_workers} workers (detected {multiprocessing.cpu_count()} CPUs)")
 
     input_path = Path(args.input)
     all_results = {}
@@ -464,7 +476,7 @@ def main():
     if input_path.is_file():
         # Single file
         print(f"Verifying: {input_path.name}")
-        stats = verify_file(str(input_path), args.verbose, args.timeout, args.quiet)
+        stats = verify_file(str(input_path), args.verbose, args.timeout, args.quiet, num_workers=num_workers)
         print_summary(stats, input_path.name)
         all_results[input_path.name] = stats
 
@@ -480,7 +492,7 @@ def main():
 
         for file_path in files:
             print(f"\nVerifying: {file_path.name}")
-            stats = verify_file(str(file_path), args.verbose, args.timeout, args.quiet)
+            stats = verify_file(str(file_path), args.verbose, args.timeout, args.quiet, num_workers=num_workers)
             print_summary(stats, file_path.name)
             all_results[file_path.name] = stats
 
