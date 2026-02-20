@@ -35,10 +35,8 @@ LLM_REFINE_TOOL = {
     "function": {
         "name": "llm_refine",
         "description": (
-            "Summarize your progress and get critical feedback. "
-            "Returns a compressed summary of correct work plus feedback: "
-            "if your approach has errors or is stuck, it will point out the mistake "
-            "and suggest a different direction."
+            "Summarize your progress and continue with a fresh start. "
+            "Call after each major reasoning step."
         ),
         "parameters": {"type": "object", "properties": {}}
     }
@@ -46,34 +44,15 @@ LLM_REFINE_TOOL = {
 
 # Default system prompt
 DEFAULT_SYSTEM_PROMPT = """\
-You are a mathematical reasoning assistant solving competition-level math problems.
-
-You MUST follow this workflow strictly:
-1. Do ONE step of reasoning (set up the problem, try one approach, or make partial progress).
-2. Then IMMEDIATELY call the `llm_refine` tool to compress and save your progress.
-3. After receiving the refined summary, continue with the next reasoning step.
-4. Repeat steps 1-3 until you reach a final answer.
-
-CRITICAL RULES:
-- You MUST call `llm_refine` after every reasoning step. Do NOT try to solve the entire problem in one pass.
-- After writing a chunk of reasoning, STOP and call the tool. Do not keep going.
-- When you reach a final answer, present it using \\boxed{} notation (no tool call needed for the final answer).
-
-Example of correct behavior:
-1. Write: "Let me set up the problem... [partial work]"
-2. Call: llm_refine
-3. Receive summary, then write: "Continuing from the summary... [more work]"
-4. Call: llm_refine
-5. Receive summary, then write: "Now I can conclude... \\boxed{answer}"
+You are a mathematical reasoning assistant. You have a tool `llm_refine` that \
+summarizes your work so far. After calling it, you continue solving with a fresh \
+perspective while retaining key insights. Call it after each major reasoning step. \
+Present your final answer using \\boxed{} notation.\
 """
 
 LLM_REFINE_USER_HINT = """
 
-IMPORTANT: You have access to the `llm_refine` tool. If your reasoning is getting long or you want to consolidate your progress before continuing, call it using:
-<tool_call>
-{"name": "llm_refine", "arguments": {}}
-</tool_call>
-You will receive a compressed summary of your work so far, then you can continue solving from there."""
+You have `llm_refine` — call it after each major reasoning step to checkpoint your progress."""
 
 
 # ============================================================
@@ -121,37 +100,33 @@ def load_jsonl(file_path: str) -> List[Dict]:
     return data
 
 
-def create_refinement_prompt(original_prompt: str, partial_generation: str,
-                             preserve_answer: bool = True) -> str:
-    """Create the context refinement prompt."""
-    if preserve_answer:
-        return f"""Original Problem:
+def create_summarization_prompt(original_prompt: str, existing_summary: str,
+                                latest_reasoning: str) -> str:
+    """Create an RC-style summarization prompt.
+
+    Produces a first-person, descriptive summary (max 2 paragraphs) that
+    captures the reasoning progress without adding new analysis.
+    """
+    return f"""You are given a maths problem and a candidate solution to it. You may also be given a summary of a previous candidate solution to the problem. If this is provided, you may assume that the current candidate solution was generated conditioned on the summary of the previous candidate solution.
+Your task is to write a summary of the current candidate solution.
+
+The new summary you generate should possess the following characteristics:
+- It should provide a detailed overview of what occurred in the current candidate solution. This may include a summary of the high-level problem-solving strategy, a description of theorems used, verification attempts, calculations and logical deductions etc.
+- It should summarize the current candidate solution in light of any previous summaries, if provided. We should be able to understand the relationship between the previous solution and the current solution by reading the summary. Make sure any important information contained in the existing summary is retained in the new one.
+- It should be no more than two paragraphs long and written in paragraph form, without headers or subheaders.
+- It should be written in the first person, as if though it is being written by the person solving the problem.
+- The candidate solution may not be complete. In this case, the summary should still attempt to summarize the partial solution.
+
+IMPORTANT: Do not under any circumstances add any additional reasoning not contained in the latest reasoning step. Your task is only to summarize what is given to you.
+
+### PROBLEM
 {original_prompt}
 
-Reasoning So Far:
-{partial_generation}
+### EXISTING SUMMARY
+{existing_summary}
 
-Critically review the reasoning above, then output exactly two sections:
-
-## Summary
-Compress the correct progress into key insights and intermediate results. Remove redundant text and false starts. If a final answer (\\boxed{{}}) was found and is correct, preserve it.
-
-## Feedback
-If the reasoning has errors or is stuck, point out the mistake and suggest a different approach. If it is on track, state what remains to be done."""
-    else:
-        return f"""Original Problem:
-{original_prompt}
-
-Reasoning So Far:
-{partial_generation}
-
-Critically review the reasoning above, then output exactly two sections:
-
-## Summary
-Compress the correct progress into key insights and intermediate results. Remove redundant text and false starts. Do NOT include any final answer or \\boxed{{}}.
-
-## Feedback
-If the reasoning has errors or is stuck, point out the mistake and suggest a different approach. If it is on track, state what remains to be done."""
+### LATEST CANDIDATE SOLUTION
+{latest_reasoning}"""
 
 
 # ============================================================
@@ -189,11 +164,14 @@ def render_prompt(tokenizer, messages: List[Dict], tools: List[Dict]) -> str:
     )
 
 
-def render_refinement_prompt(tokenizer, problem: str, context: str,
-                             preserve_answer: bool = True) -> str:
-    """Build the refinement prompt (no tools, plain chat template)."""
-    refinement_text = create_refinement_prompt(problem, context, preserve_answer)
-    messages = [{"role": "user", "content": refinement_text}]
+def render_summarization_prompt(tokenizer, problem: str,
+                                existing_summary: str,
+                                latest_reasoning: str) -> str:
+    """Build the summarization prompt (no tools, plain chat template)."""
+    summarization_text = create_summarization_prompt(
+        problem, existing_summary, latest_reasoning
+    )
+    messages = [{"role": "user", "content": summarization_text}]
     return tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -204,27 +182,27 @@ def render_refinement_prompt(tokenizer, problem: str, context: str,
 # ============================================================
 
 class LocalRefiner:
-    """Uses the same vLLM LLM instance for refinement."""
+    """Uses the same vLLM LLM instance for summarization."""
 
-    def __init__(self, llm, tokenizer, sampling_params, preserve_answer: bool = True):
+    def __init__(self, llm, tokenizer, sampling_params):
         self.llm = llm
         self.tokenizer = tokenizer
         self.sampling_params = sampling_params
-        self.preserve_answer = preserve_answer
 
     def refine_batch(self, batch: List[Dict]) -> List[str]:
-        """Refine a batch of (original_prompt, partial_generation) pairs.
+        """Summarize a batch using RC-style summarization.
 
         Args:
-            batch: List of dicts with keys 'original_prompt' and 'context_to_refine'
+            batch: List of dicts with keys 'original_prompt',
+                   'existing_summary', and 'latest_reasoning'
 
         Returns:
-            List of refined summary strings
+            List of summary strings
         """
         prompts = [
-            render_refinement_prompt(
+            render_summarization_prompt(
                 self.tokenizer, item["original_prompt"],
-                item["context_to_refine"], self.preserve_answer
+                item["existing_summary"], item["latest_reasoning"]
             )
             for item in batch
         ]
@@ -233,35 +211,35 @@ class LocalRefiner:
 
 
 class APIRefiner:
-    """Calls an external vLLM server via OpenAI-compatible API for refinement."""
+    """Calls an external vLLM server via OpenAI-compatible API for summarization."""
 
     def __init__(self, base_url: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 16384, preserve_answer: bool = True):
+                 max_tokens: int = 16384):
         from openai import OpenAI
         self.client = OpenAI(base_url=base_url, api_key="dummy")
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.preserve_answer = preserve_answer
 
     def refine_batch(self, batch: List[Dict]) -> List[str]:
-        """Refine a batch by calling the API sequentially.
+        """Summarize a batch by calling the API sequentially.
 
         Args:
-            batch: List of dicts with keys 'original_prompt' and 'context_to_refine'
+            batch: List of dicts with keys 'original_prompt',
+                   'existing_summary', and 'latest_reasoning'
 
         Returns:
-            List of refined summary strings
+            List of summary strings
         """
         results = []
         for item in batch:
-            refinement_text = create_refinement_prompt(
-                item["original_prompt"], item["context_to_refine"],
-                self.preserve_answer
+            summarization_text = create_summarization_prompt(
+                item["original_prompt"], item["existing_summary"],
+                item["latest_reasoning"]
             )
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": refinement_text}],
+                messages=[{"role": "user", "content": summarization_text}],
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -396,7 +374,6 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
             model=refiner_model,
             temperature=args.temperature,
             max_tokens=args.max_refinement_tokens,
-            preserve_answer=args.preserve_answer,
         )
     else:
         print(f"[GPU {gpu_id}] Using local refiner (same vLLM instance)")
@@ -404,7 +381,6 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
             llm=llm,
             tokenizer=tokenizer,
             sampling_params=refinement_sampling_params,
-            preserve_answer=args.preserve_answer,
         )
 
     system_prompt = args.system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -473,18 +449,21 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                 last_round = state.rounds_data[-1]
                 chunk = last_round["current_round_generation"]
 
-                # Accumulate: previous refined context + current chunk
-                if state.last_refined_context:
-                    context_to_refine = state.last_refined_context + "\n\n" + chunk
-                else:
-                    context_to_refine = chunk
-
                 refine_batch.append({
                     "original_prompt": state.original_prompt,
-                    "context_to_refine": context_to_refine,
+                    "existing_summary": state.last_refined_context or "",
+                    "latest_reasoning": chunk,
                 })
 
             refined_texts = refiner.refine_batch(refine_batch)
+
+            # RC-style continuation instructions
+            continuation_instructions = (
+                "\n\nContinue solving the problem, improving upon the "
+                "summary above. You may verify previous conclusions, try a "
+                "different approach, or build on the progress so far.\n"
+                "Return your final answer in \\boxed{}."
+            )
 
             for state, refined in zip(needs_refinement, refined_texts):
                 # Update state
@@ -496,11 +475,14 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                 last_round = state.rounds_data[-1]
 
                 if args.compact_context:
-                    # Compact mode: only keep prompt + latest summary.
-                    # Reset conversation_turns each round to avoid long context.
+                    # Compact mode: fresh start with only summary + continuation hint.
+                    # Reset conversation_turns each round (RC-style).
+                    # Keep last generation in assistant turn to match training format
+                    # (training always has [generation text] + <tool_call> together).
                     state.conversation_turns = [
-                        {"role": "assistant", "content": '<tool_call>\n{"name": "llm_refine", "arguments": {}}\n</tool_call>'},
-                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"},
+                        {"role": "assistant", "content": last_round["current_round_generation"] + '\n<tool_call>\n{"name": "llm_refine", "arguments": {}}\n</tool_call>'},
+                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"
+                         + continuation_instructions},
                     ]
                 else:
                     # Default: accumulate full generation history
@@ -512,7 +494,8 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                         {"role": "assistant", "content": assistant_content}
                     )
                     state.conversation_turns.append(
-                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"}
+                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"
+                         + continuation_instructions}
                     )
 
         # Save intermediate results
@@ -657,8 +640,11 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--max_refinement_tokens", type=int, default=None,
                         help="Max tokens for refinement (default: 16384)")
-    parser.add_argument("--preserve_answer", action="store_true", default=True)
-    parser.add_argument("--strip_answer", action="store_true")
+    # Legacy flags (no longer used — summarization is always descriptive)
+    parser.add_argument("--preserve_answer", action="store_true", default=True,
+                        help="(deprecated, no-op)")
+    parser.add_argument("--strip_answer", action="store_true",
+                        help="(deprecated, no-op)")
     parser.add_argument("--num_gpus", type=int, default=None)
     parser.add_argument("--max_model_len", type=int, default=None)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
@@ -667,14 +653,17 @@ def main():
                              "(removes generation from conversation history)")
     parser.add_argument("--system_prompt", type=str, default=None,
                         help="Override default system prompt")
+    parser.add_argument("--system_prompt_file", type=str, default=None,
+                        help="Read system prompt from file (takes precedence over --system_prompt)")
 
     args = parser.parse_args()
 
+    if args.system_prompt_file:
+        with open(args.system_prompt_file, "r") as f:
+            args.system_prompt = f.read().strip()
+
     if args.max_refinement_tokens is None:
         args.max_refinement_tokens = 16384
-
-    if args.strip_answer:
-        args.preserve_answer = False
 
     if args.max_model_len is None:
         args.max_model_len = min(
@@ -706,7 +695,6 @@ def main():
     print(f"Max Refinement Tokens: {args.max_refinement_tokens}")
     print(f"Max Rounds: {args.max_rounds}")
     print(f"Num Samples: {args.num_samples}")
-    print(f"Preserve Answer: {args.preserve_answer}")
     print(f"Compact Context: {args.compact_context}")
     print(f"{'='*80}\n")
 

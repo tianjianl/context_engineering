@@ -135,6 +135,33 @@ CRITICAL RULES:
 Output a concise summary of the progress made so far, ending with what still needs to be done. Do NOT provide any final answer."""
 
 
+def create_rc_user_reasoning_prompt(problem: str, summary: str) -> str:
+    """Create user-prompt-style reasoning prompt (RC reimpl style).
+
+    Instead of injecting the summary as an assistant prefix, embed it
+    in the user message so the model conditions on it as input.
+    """
+    return f"""You are given a maths problem. You may also be given a summary of a previous attempt to solve it. This previous attempt may or may not be correct.
+
+### PROBLEM
+{problem}
+
+### SUMMARY OF PREVIOUS ATTEMPT
+{summary}
+
+### INSTRUCTIONS
+If no summary of a previous attempt is provided, solve the problem from scratch.
+
+If a summary of a previous attempt is provided, your task is to improve upon this attempt. You should rely on this summary to guide your thinking.
+Some strategies you could use include:
+- Verifying the previous solution.
+- Proving the result in a different way.
+- Finding alternative problem-solving strategies.
+- Continuing from where the previous solution left off, assuming that the previous solution is incomplete.
+
+Reason step-by-step and return your final answer in \\boxed{{}}."""
+
+
 def create_rc_refinement_prompt(problem: str, existing_summary: str, reasoning: str) -> str:
     """Create an RC-style refinement prompt (incremental summarization).
 
@@ -233,9 +260,15 @@ def save_intermediate_results(gpu_id: int, valid_items: List[Dict], original_pro
 
 
 def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Queue):
-    """Worker process that runs on a single GPU."""
+    """Worker process that runs on a single GPU (or multiple GPUs with tensor parallelism)."""
     # Set GPU visibility before importing vLLM
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    tp = args.tensor_parallel_size
+    if tp > 1:
+        # Expose tp consecutive GPUs starting from gpu_id * tp
+        gpu_start = gpu_id * tp
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_start + i) for i in range(tp))
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     # Import vLLM after setting GPU
     from vllm import LLM, SamplingParams
@@ -246,10 +279,10 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
-    # Initialize vLLM with tensor_parallel_size=1
+    # Initialize vLLM
     llm = LLM(
         model=args.model,
-        tensor_parallel_size=1,
+        tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=True,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -280,15 +313,15 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
         )
 
     def apply_chat_template_with_prefix(prompt: str, assistant_prefix: str) -> str:
-        messages = [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": assistant_prefix}
-        ]
-        return tokenizer.apply_chat_template(
-            messages,
+        # Build prompt with user message + start of assistant turn + prefix
+        # We must NOT close the assistant turn with <|im_end|> since the model
+        # should continue generating after the prefix.
+        base = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
             tokenize=False,
-            add_generation_prompt=False
+            add_generation_prompt=True
         )
+        return base + assistant_prefix
 
     results = []
     num_samples = args.num_samples
@@ -316,7 +349,12 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
             for q_idx, orig in enumerate(original_prompts):
                 for s_idx in range(num_samples):
                     prefix = all_samples_prefixes[q_idx][s_idx]
-                    flat_prompts.append(apply_chat_template_with_prefix(orig, prefix))
+                    if args.rc_user:
+                        # RC user mode: embed summary in user prompt
+                        user_prompt = create_rc_user_reasoning_prompt(orig, prefix)
+                        flat_prompts.append(apply_chat_template(user_prompt, add_generation_prompt=True))
+                    else:
+                        flat_prompts.append(apply_chat_template_with_prefix(orig, prefix))
 
             subsequent_sampling_params = SamplingParams(
                 temperature=args.temperature,
@@ -363,7 +401,12 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
         for q_idx, orig in enumerate(original_prompts):
             for s_idx in range(num_samples):
                 current_gen = current_round_generations[q_idx][s_idx]
-                if args.rc_verify:
+                if args.rc_user:
+                    existing_summary = all_samples_prefixes[q_idx][s_idx]
+                    refinement_prompt_raw = create_rc_refinement_prompt(
+                        orig, existing_summary, current_gen
+                    )
+                elif args.rc_verify:
                     existing_summary = all_samples_prefixes[q_idx][s_idx]
                     refinement_prompt_raw = create_rc_verify_refinement_prompt(
                         orig, existing_summary, current_gen
@@ -419,7 +462,7 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                 all_samples_rounds_data[q_idx][s_idx].append(round_data)
 
                 # Update prefix for next round
-                if args.rc or args.rc_verify:
+                if args.rc or args.rc_verify or args.rc_user:
                     # RC mode: summary replaces previous context (fixed-size window)
                     all_samples_prefixes[q_idx][s_idx] = refined_ctx
                 else:
@@ -582,6 +625,11 @@ def main():
         help="Use RC-style refinement with verification: like --rc but the summary critically evaluates the solution and suggests improvements for the next attempt"
     )
     parser.add_argument(
+        "--rc_user",
+        action="store_true",
+        help="Like --rc but puts the summary in the user prompt (RC reimpl style) instead of as an assistant prefix"
+    )
+    parser.add_argument(
         "--strip_thinking_from_refinement",
         action="store_true",
         default=True,
@@ -620,6 +668,12 @@ def main():
         type=float,
         default=0.95,
         help="GPU memory utilization (default: 0.95)"
+    )
+    parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="Tensor parallel size per vLLM instance (default: 1)"
     )
 
     args = parser.parse_args()
@@ -672,6 +726,7 @@ def main():
     print(f"Accumulate: {args.accumulate}")
     print(f"Accumulate Raw: {args.accumulate_raw}")
     print(f"RC Mode: {args.rc}")
+    print(f"RC User Mode: {args.rc_user}")
     print(f"Preserve Answer: {args.preserve_answer}")
     print(f"Disable Thinking for Refinement: {args.disable_thinking_for_refinement}")
     print(f"Strip Thinking from Generation: {args.strip_thinking_from_generation}")
