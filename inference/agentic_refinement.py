@@ -10,20 +10,22 @@ and the refined summary is returned as a <tool_response>.
 
 import argparse
 import json
-import csv
 import os
-import torch
 import multiprocessing as mp
-from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
-import urllib.request
 
 from jinja2 import Template
 
-
-# Dataset URLs
-IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
+from inference.data_utils import load_dataset, strip_thinking, create_refinement_prompt
+from inference.dp_utils import (
+    detect_gpus, shard_data, run_data_parallel, save_merged_results,
+    SampleState, save_intermediate_results,
+)
+from inference.args_utils import (
+    add_common_args, add_dp_args, add_refinement_args,
+    post_process_args, validate_args,
+)
 
 # Tool definition for llm_refine
 LLM_REFINE_TOOL = {
@@ -105,108 +107,6 @@ For each function call, return a json object with function name and arguments wi
 
 
 # ============================================================
-# Data loading utilities (reused from context_refinement_dp.py)
-# ============================================================
-
-def download_imobench(cache_dir: str) -> str:
-    """Download IMOBench (AnswerBench) CSV if not already cached."""
-    cache_path = Path(cache_dir) / "answerbench.csv"
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    if not cache_path.exists():
-        print(f"Downloading IMOBench from {IMOBENCH_URL}...")
-        urllib.request.urlretrieve(IMOBENCH_URL, cache_path)
-        print(f"Saved to {cache_path}")
-    else:
-        print(f"Loading IMOBench from {cache_path}")
-    return str(cache_path)
-
-
-def load_imobench(csv_path: str) -> List[Dict]:
-    """Load data from IMOBench (AnswerBench) CSV file."""
-    data = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            data.append({
-                "problem_id": row.get("Problem ID", ""),
-                "prompt": row.get("Problem", ""),
-                "answer": row.get("Short Answer", ""),
-                "category": row.get("Category", ""),
-                "subcategory": row.get("Subcategory", ""),
-                "source": row.get("Source", "")
-            })
-    return data
-
-
-def load_jsonl(file_path: str) -> List[Dict]:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
-
-def strip_thinking(text: str) -> str:
-    """Strip <think>...</think> section from model output."""
-    if '<think>' not in text:
-        return text
-    think_end = text.find('</think>')
-    if think_end == -1:
-        return ""
-    return text[think_end + 8:].strip()
-
-
-def create_refinement_prompt(original_prompt: str, partial_generation: str, preserve_answer: bool = True) -> str:
-    """Create the context refinement prompt."""
-    if preserve_answer:
-        return f"""Context Refinement Prompt:
-
-Original Prompt:
-{original_prompt}
-
-Partial Generation:
-{partial_generation}
-
-Your task is to create a compressed summary for another model to continue solving from.
-
-RULES:
-1. If a final answer (e.g., \\boxed{{}}) was found, PRESERVE IT at the end of your summary
-2. Keep key insights, important calculations, and the reasoning path
-3. Remove redundant text, false starts, and unnecessary repetition
-4. If the answer seems wrong or unverified, note that verification is needed
-5. Be concise but preserve all critical mathematical steps
-
-Output format:
-- Key insights and progress made
-- Important intermediate results
-- If found: "Final Answer: [the answer]" or the \\boxed{{}} expression
-- If not solved: what still needs to be done"""
-    else:
-        return f"""Context Refinement Prompt:
-
-Original Prompt:
-{original_prompt}
-
-Partial Generation:
-{partial_generation}
-
-Your task is to create a WORK-IN-PROGRESS summary for another model to continue solving from.
-
-CRITICAL RULES:
-1. NEVER include any final answer or \\boxed{{}} in your output
-2. NEVER conclude or claim the problem is solved
-3. Remove any "Final Answer" sections completely
-4. Keep only intermediate calculations, key insights, and partial progress
-5. End your summary at a natural continuation point where more work is needed
-6. If the generation reached a wrong answer, note the approach taken but indicate it needs verification
-
-Output a concise summary of the progress made so far, ending with what still needs to be done. Do NOT provide any final answer."""
-
-
-# ============================================================
 # Prompt construction
 # ============================================================
 
@@ -256,74 +156,6 @@ def format_refinement_prompt(tokenizer, problem: str, context: str,
     return tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-
-
-# ============================================================
-# State tracking
-# ============================================================
-
-@dataclass
-class SampleState:
-    """Tracks the agent loop state for a single (question, sample) pair."""
-    q_idx: int
-    s_idx: int
-    original_prompt: str
-    conversation_turns: List[Dict] = field(default_factory=list)
-    rounds_data: List[Dict] = field(default_factory=list)
-    is_done: bool = False
-    done_reason: str = ""
-    num_tool_calls: int = 0
-    last_refined_context: str = ""
-
-
-# ============================================================
-# Intermediate saving
-# ============================================================
-
-def save_intermediate_results(gpu_id: int, valid_items: List[Dict],
-                               original_prompts: List[str],
-                               all_states: List[List[SampleState]],
-                               num_samples: int, round_num: int,
-                               output_file: str):
-    """Save intermediate results for this GPU after a round completes.
-
-    Args:
-        all_states: all_states[q_idx][s_idx] = SampleState
-    """
-    results = []
-    for q_idx, (item, orig_prompt) in enumerate(zip(valid_items, original_prompts)):
-        samples = []
-        for s_idx in range(num_samples):
-            state = all_states[q_idx][s_idx]
-            rounds_data = state.rounds_data
-            sample_result = {
-                "sample_idx": s_idx,
-                "rounds": rounds_data,
-                "final_refined_context": state.last_refined_context,
-                "full_assistant_message": (
-                    state.last_refined_context + rounds_data[-1]["current_round_generation"]
-                    if rounds_data else ""
-                ),
-                "num_tool_calls": state.num_tool_calls,
-                "done_reason": state.done_reason,
-            }
-            samples.append(sample_result)
-
-        result = {
-            "original_prompt": orig_prompt,
-            "num_samples": num_samples,
-            "samples": samples,
-            **{k: v for k, v in item.items() if k != "prompt"}
-        }
-        results.append(result)
-
-    output_path = Path(output_file)
-    intermediate_file = output_path.parent / f"{output_path.stem}_intermediate_gpu{gpu_id}.jsonl"
-    intermediate_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(intermediate_file, 'w', encoding='utf-8') as f:
-        for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
-    print(f"[GPU {gpu_id}] Saved intermediate results after round {round_num + 1} to {intermediate_file}")
 
 
 # ============================================================
@@ -619,67 +451,23 @@ def main():
     parser = argparse.ArgumentParser(
         description="Agentic context refinement with tool-calling using vLLM Data Parallelism"
     )
-    parser.add_argument(
-        "--dataset", type=str, choices=["hmmt", "imobench"], required=True,
-        help="Dataset to use"
-    )
-    parser.add_argument("--input_file", type=str, default=None,
-                        help="Input JSONL file (required for hmmt)")
-    parser.add_argument("--cache_dir", type=str,
-                        default="/scratch/dkhasha1/tli104/imobench")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B")
-    parser.add_argument("--num_tokens", type=int, required=True,
-                        help="Max tokens per generation step")
-    parser.add_argument("--output_file", type=str, default="output_agentic.jsonl")
+    add_common_args(parser)
+    add_dp_args(parser)
+    add_refinement_args(parser)
+
+    # Agentic-specific args
     parser.add_argument("--max_rounds", type=int, default=12,
                         help="Maximum number of generation rounds (default: 12)")
-    parser.add_argument("--num_samples", type=int, default=1,
-                        help="Number of samples per question (default: 1)")
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--top_k", type=int, default=-1)
-    parser.add_argument("--max_refinement_tokens", type=int, default=None,
-                        help="Max tokens for refinement (default: 16384)")
-    parser.add_argument("--preserve_answer", action="store_true", default=True)
-    parser.add_argument("--strip_answer", action="store_true")
-    parser.add_argument("--disable_thinking_for_refinement", action="store_true")
-    parser.add_argument("--strip_thinking_from_refinement", action="store_true", default=True)
-    parser.add_argument("--keep_thinking_in_refinement", action="store_true")
-    parser.add_argument("--strip_thinking_from_generation", action="store_true", default=True)
-    parser.add_argument("--keep_thinking_in_generation", action="store_true")
-    parser.add_argument("--num_gpus", type=int, default=None)
-    parser.add_argument("--max_model_len", type=int, default=None)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--system_prompt", type=str, default=None,
                         help="Override default system prompt")
 
     args = parser.parse_args()
-
-    if args.max_refinement_tokens is None:
-        args.max_refinement_tokens = 16384
-
-    if args.strip_answer:
-        args.preserve_answer = False
-    if args.keep_thinking_in_refinement:
-        args.strip_thinking_from_refinement = False
-    if args.keep_thinking_in_generation:
-        args.strip_thinking_from_generation = False
-
-    if args.max_model_len is None:
-        args.max_model_len = min(
-            args.num_tokens + args.max_refinement_tokens + 8192,
-            131072
-        )
-
-    if args.dataset == "hmmt" and args.input_file is None:
-        parser.error("--input_file is required when using --dataset hmmt")
+    post_process_args(args)
+    validate_args(args, parser)
 
     # Detect GPUs
-    num_gpus = torch.cuda.device_count()
-    if args.num_gpus is None:
-        args.num_gpus = num_gpus
-    else:
-        args.num_gpus = min(args.num_gpus, num_gpus)
+    args.num_gpus = detect_gpus(args.num_gpus)
+    num_gpus = args.num_gpus
 
     print(f"\n{'='*80}")
     print(f"Agentic Refinement - Data Parallel Inference")
@@ -700,61 +488,18 @@ def main():
 
     # Load data
     print(f"Loading Dataset: {args.dataset.upper()}")
-    if args.dataset == "imobench":
-        if args.input_file:
-            data = load_jsonl(args.input_file)
-        else:
-            csv_path = download_imobench(args.cache_dir)
-            data = load_imobench(csv_path)
-    elif args.dataset == "hmmt":
-        data = load_jsonl(args.input_file)
-
+    data = load_dataset(args.dataset, args.input_file, args.cache_dir)
     print(f"Loaded {len(data)} problems")
 
-    # Shard data across GPUs
-    shards = [[] for _ in range(args.num_gpus)]
-    for i, item in enumerate(data):
-        shards[i % args.num_gpus].append(item)
+    # Shard and run data-parallel
+    shards = shard_data(data, args.num_gpus)
     print(f"Data sharding: {[len(s) for s in shards]}")
 
-    # Start worker processes
-    mp.set_start_method('spawn', force=True)
-    result_queue = mp.Queue()
-    processes = []
-
-    for gpu_id in range(args.num_gpus):
-        p = mp.Process(
-            target=worker_process,
-            args=(gpu_id, shards[gpu_id], args, result_queue)
-        )
-        p.start()
-        processes.append(p)
-
-    # Collect results
-    all_results = {}
-    for _ in range(args.num_gpus):
-        gpu_id, results = result_queue.get()
-        all_results[gpu_id] = results
-        print(f"[Main] Received {len(results)} results from GPU {gpu_id}")
-
-    for p in processes:
-        p.join()
-
-    # Merge results maintaining original order
-    merged_results = []
-    indices = [0] * args.num_gpus
-    for i in range(len(data)):
-        gpu_id = i % args.num_gpus
-        if indices[gpu_id] < len(all_results[gpu_id]):
-            merged_results.append(all_results[gpu_id][indices[gpu_id]])
-            indices[gpu_id] += 1
+    merged_results = run_data_parallel(worker_process, shards, args.num_gpus, args)
 
     # Save results
     print(f"\nSaving {len(merged_results)} results to {args.output_file}...")
-    Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output_file, 'w', encoding='utf-8') as f:
-        for result in merged_results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    save_merged_results(merged_results, args.output_file)
 
     # Summary stats
     total_tool_calls = sum(

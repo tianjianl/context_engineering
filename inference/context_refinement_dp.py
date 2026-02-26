@@ -8,131 +8,22 @@ vLLM instance with tensor_parallel_size=1).
 
 import argparse
 import json
-import csv
 import os
 import torch
 import multiprocessing as mp
 from typing import List, Dict
 from pathlib import Path
-import urllib.request
 
-
-# Dataset URLs
-IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
-
-
-def download_imobench(cache_dir: str) -> str:
-    """Download IMOBench (AnswerBench) CSV if not already cached."""
-    cache_path = Path(cache_dir) / "answerbench.csv"
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-
-    if not cache_path.exists():
-        print(f"Downloading IMOBench from {IMOBENCH_URL}...")
-        urllib.request.urlretrieve(IMOBENCH_URL, cache_path)
-        print(f"Saved to {cache_path}")
-    else:
-        print(f"Loading IMOBench from {cache_path}")
-
-    return str(cache_path)
-
-
-def load_imobench(csv_path: str) -> List[Dict]:
-    """Load data from IMOBench (AnswerBench) CSV file."""
-    data = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            data.append({
-                "problem_id": row.get("Problem ID", ""),
-                "prompt": row.get("Problem", ""),
-                "answer": row.get("Short Answer", ""),
-                "category": row.get("Category", ""),
-                "subcategory": row.get("Subcategory", ""),
-                "source": row.get("Source", "")
-            })
-    return data
-
-
-def load_jsonl(file_path: str) -> List[Dict]:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
-
-def strip_thinking(text: str) -> str:
-    """Strip <think>...</think> section from model output.
-
-    If </think> is not found (model ran out of tokens while thinking),
-    returns empty string since there's no actual content.
-    """
-    if '<think>' not in text:
-        return text
-
-    think_end = text.find('</think>')
-    if think_end == -1:
-        # Model ran out of tokens while thinking - no actual content
-        return ""
-
-    # Return content after </think>
-    return text[think_end + 8:].strip()
-
-
-def create_refinement_prompt(original_prompt: str, partial_generation: str, preserve_answer: bool = True) -> str:
-    """Create the context refinement prompt.
-
-    Args:
-        original_prompt: The original problem statement
-        partial_generation: The generation to refine/compress
-        preserve_answer: If True, preserve any final answer found. If False, strip answers.
-    """
-    if preserve_answer:
-        return f"""Context Refinement Prompt:
-
-Original Prompt:
-{original_prompt}
-
-Partial Generation:
-{partial_generation}
-
-Your task is to create a compressed summary for another model to continue solving from.
-
-RULES:
-1. If a final answer (e.g., \\boxed{{}}) was found, PRESERVE IT at the end of your summary
-2. Keep key insights, important calculations, and the reasoning path
-3. Remove redundant text, false starts, and unnecessary repetition
-4. If the answer seems wrong or unverified, note that verification is needed
-5. Be concise but preserve all critical mathematical steps
-
-Output format:
-- Key insights and progress made
-- Important intermediate results
-- If found: "Final Answer: [the answer]" or the \\boxed{{}} expression
-- If not solved: what still needs to be done"""
-    else:
-        return f"""Context Refinement Prompt:
-
-Original Prompt:
-{original_prompt}
-
-Partial Generation:
-{partial_generation}
-
-Your task is to create a WORK-IN-PROGRESS summary for another model to continue solving from.
-
-CRITICAL RULES:
-1. NEVER include any final answer or \\boxed{{}} in your output
-2. NEVER conclude or claim the problem is solved
-3. Remove any "Final Answer" sections completely
-4. Keep only intermediate calculations, key insights, and partial progress
-5. End your summary at a natural continuation point where more work is needed
-6. If the generation reached a wrong answer, note the approach taken but indicate it needs verification
-
-Output a concise summary of the progress made so far, ending with what still needs to be done. Do NOT provide any final answer."""
+from inference.data_utils import (
+    load_dataset, strip_thinking, create_refinement_prompt,
+    apply_chat_template as _apply_chat_template,
+    apply_chat_template_with_prefix as _apply_chat_template_with_prefix,
+)
+from inference.dp_utils import detect_gpus, shard_data, run_data_parallel, save_merged_results
+from inference.args_utils import (
+    add_common_args, add_dp_args, add_refinement_args,
+    post_process_args, validate_args,
+)
 
 
 def create_rc_user_reasoning_prompt(problem: str, summary: str) -> str:
@@ -264,7 +155,6 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
     # Set GPU visibility before importing vLLM
     tp = args.tensor_parallel_size
     if tp > 1:
-        # Expose tp consecutive GPUs starting from gpu_id * tp
         gpu_start = gpu_id * tp
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_start + i) for i in range(tp))
     else:
@@ -305,23 +195,10 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
     )
 
     def apply_chat_template(prompt: str, add_generation_prompt: bool = False) -> str:
-        messages = [{"role": "user", "content": prompt}]
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt
-        )
+        return _apply_chat_template(tokenizer, prompt, add_generation_prompt)
 
     def apply_chat_template_with_prefix(prompt: str, assistant_prefix: str) -> str:
-        # Build prompt with user message + start of assistant turn + prefix
-        # We must NOT close the assistant turn with <|im_end|> since the model
-        # should continue generating after the prefix.
-        base = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        return base + assistant_prefix
+        return _apply_chat_template_with_prefix(tokenizer, prompt, assistant_prefix)
 
     results = []
     num_samples = args.num_samples
@@ -515,208 +392,35 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate and refine contexts using vLLM with Data Parallelism"
     )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        choices=["hmmt", "imobench"],
-        required=True,
-        help="Dataset to use: 'hmmt' or 'imobench'"
-    )
-    parser.add_argument(
-        "--input_file",
-        type=str,
-        default=None,
-        help="Input JSONL file (required for hmmt, optional for imobench)"
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default="/scratch/dkhasha1/tli104/imobench",
-        help="Directory to cache downloaded datasets"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="Qwen/Qwen3-8B",
-        help="Model name or path to use for generation"
-    )
-    parser.add_argument(
-        "--num_tokens",
-        type=int,
-        required=True,
-        help="Number of tokens to generate in the initial generation"
-    )
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        default="output_refined.jsonl",
-        help="Output JSONL file for results"
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=1,
-        help="Number of refinement rounds to perform (default: 1)"
-    )
-    parser.add_argument(
-        "--accumulate",
-        action="store_true",
-        help="Accumulate context across rounds"
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=1,
-        help="Number of samples to generate per question (default: 1)"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.7,
-        help="Sampling temperature (default: 0.7)"
-    )
-    parser.add_argument(
-        "--top_p",
-        type=float,
-        default=0.9,
-        help="Top-p sampling parameter (default: 0.9)"
-    )
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=-1,
-        help="Top-k sampling parameter (default: -1, disabled)"
-    )
-    parser.add_argument(
-        "--max_refinement_tokens",
-        type=int,
-        default=None,
-        help="Maximum tokens for refinement output (default: 16384 for thinking models)"
-    )
-    parser.add_argument(
-        "--preserve_answer",
-        action="store_true",
-        default=True,
-        help="Preserve final answers in refinement (default: True)"
-    )
-    parser.add_argument(
-        "--strip_answer",
-        action="store_true",
-        help="Strip final answers from refinement (opposite of --preserve_answer)"
-    )
-    parser.add_argument(
-        "--disable_thinking_for_refinement",
-        action="store_true",
-        help="Disable thinking mode for refinement prompts (adds /no_think suffix)"
-    )
-    parser.add_argument(
-        "--accumulate_raw",
-        action="store_true",
-        help="Accumulate raw generations instead of refined context for continuation (simple continuation baseline)"
-    )
-    parser.add_argument(
-        "--rc",
-        action="store_true",
-        help="Use RC-style incremental summarization: each round merges existing summary with latest reasoning into a fixed-size replacement summary (instead of appending refined context)"
-    )
-    parser.add_argument(
-        "--rc_verify",
-        action="store_true",
-        help="Use RC-style refinement with verification: like --rc but the summary critically evaluates the solution and suggests improvements for the next attempt"
-    )
-    parser.add_argument(
-        "--rc_user",
-        action="store_true",
-        help="Like --rc but puts the summary in the user prompt (RC reimpl style) instead of as an assistant prefix"
-    )
-    parser.add_argument(
-        "--strip_thinking_from_refinement",
-        action="store_true",
-        default=True,
-        help="Strip <think>...</think> from refinement output (default: True)"
-    )
-    parser.add_argument(
-        "--keep_thinking_in_refinement",
-        action="store_true",
-        help="Keep <think>...</think> in refinement output (opposite of --strip_thinking_from_refinement)"
-    )
-    parser.add_argument(
-        "--strip_thinking_from_generation",
-        action="store_true",
-        default=True,
-        help="Strip <think>...</think> from main generation output (default: True)"
-    )
-    parser.add_argument(
-        "--keep_thinking_in_generation",
-        action="store_true",
-        help="Keep <think>...</think> in main generation output"
-    )
-    parser.add_argument(
-        "--num_gpus",
-        type=int,
-        default=None,
-        help="Number of GPUs to use for data parallelism (default: all available)"
-    )
-    parser.add_argument(
-        "--max_model_len",
-        type=int,
-        default=None,
-        help="Maximum model context length"
-    )
-    parser.add_argument(
-        "--gpu_memory_utilization",
-        type=float,
-        default=0.95,
-        help="GPU memory utilization (default: 0.95)"
-    )
-    parser.add_argument(
-        "--tensor_parallel_size",
-        type=int,
-        default=1,
-        help="Tensor parallel size per vLLM instance (default: 1)"
-    )
+    add_common_args(parser)
+    add_dp_args(parser)
+    add_refinement_args(parser)
+
+    # Context refinement-specific args
+    parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--accumulate", action="store_true")
+    parser.add_argument("--accumulate_raw", action="store_true")
+    parser.add_argument("--rc", action="store_true")
+    parser.add_argument("--rc_verify", action="store_true")
+    parser.add_argument("--rc_user", action="store_true")
 
     args = parser.parse_args()
+    post_process_args(args)
 
-    # Default refinement tokens to 16k for thinking models to ensure completion
-    if args.max_refinement_tokens is None:
-        args.max_refinement_tokens = 16384
+    # Override max_model_len for accumulate_raw mode (needs larger context)
+    if args.accumulate_raw and args.max_model_len == min(args.num_tokens + args.max_refinement_tokens + 8192, 131072):
+        args.max_model_len = min(args.num_tokens * (args.rounds + 2), 131072)
 
-    # Handle preserve_answer / strip_answer logic
-    if args.strip_answer:
-        args.preserve_answer = False
-
-    # Handle strip_thinking logic
-    if args.keep_thinking_in_refinement:
-        args.strip_thinking_from_refinement = False
-    if args.keep_thinking_in_generation:
-        args.strip_thinking_from_generation = False
-
-    # Default max_model_len to handle generation + refinement (16k refinement tokens)
-    if args.max_model_len is None:
-        if args.accumulate_raw:
-            # Need more context when accumulating raw generations
-            # rounds * num_tokens + some buffer for input
-            args.max_model_len = min(args.num_tokens * (args.rounds + 2), 131072)
-        else:
-            # Allow for input + generation + 16k refinement
-            args.max_model_len = min(args.num_tokens + args.max_refinement_tokens + 4096, 131072)
-
-    # Validate arguments
-    if args.dataset == "hmmt" and args.input_file is None:
-        parser.error("--input_file is required when using --dataset hmmt")
+    validate_args(args, parser)
 
     # Detect GPUs
-    num_gpus = torch.cuda.device_count()
-    if args.num_gpus is None:
-        args.num_gpus = num_gpus
-    else:
-        args.num_gpus = min(args.num_gpus, num_gpus)
+    num_gpus = detect_gpus(args.num_gpus)
+    args.num_gpus = num_gpus
 
     print(f"\n{'='*80}")
     print(f"Data Parallel Inference")
     print(f"{'='*80}")
-    print(f"Available GPUs: {num_gpus}")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
     print(f"Using GPUs: {args.num_gpus}")
     print(f"Model: {args.model}")
     print(f"Max Model Length: {args.max_model_len}")
@@ -735,63 +439,19 @@ def main():
 
     # Load data
     print(f"Loading Dataset: {args.dataset.upper()}")
-    if args.dataset == "imobench":
-        if args.input_file:
-            data = load_jsonl(args.input_file)
-        else:
-            csv_path = download_imobench(args.cache_dir)
-            data = load_imobench(csv_path)
-    elif args.dataset == "hmmt":
-        data = load_jsonl(args.input_file)
-
+    data = load_dataset(args.dataset, args.input_file, args.cache_dir)
     print(f"Loaded {len(data)} problems")
 
     # Shard data across GPUs
-    shards = [[] for _ in range(args.num_gpus)]
-    for i, item in enumerate(data):
-        shards[i % args.num_gpus].append(item)
-
+    shards = shard_data(data, args.num_gpus)
     print(f"Data sharding: {[len(s) for s in shards]}")
 
-    # Start worker processes
-    mp.set_start_method('spawn', force=True)
-    result_queue = mp.Queue()
-    processes = []
-
-    for gpu_id in range(args.num_gpus):
-        p = mp.Process(
-            target=worker_process,
-            args=(gpu_id, shards[gpu_id], args, result_queue)
-        )
-        p.start()
-        processes.append(p)
-
-    # Collect results
-    all_results = {}
-    for _ in range(args.num_gpus):
-        gpu_id, results = result_queue.get()
-        all_results[gpu_id] = results
-        print(f"[Main] Received {len(results)} results from GPU {gpu_id}")
-
-    # Wait for all processes
-    for p in processes:
-        p.join()
-
-    # Merge results maintaining original order
-    merged_results = []
-    indices = [0] * args.num_gpus
-    for i in range(len(data)):
-        gpu_id = i % args.num_gpus
-        if indices[gpu_id] < len(all_results[gpu_id]):
-            merged_results.append(all_results[gpu_id][indices[gpu_id]])
-            indices[gpu_id] += 1
+    # Run data parallel inference
+    merged_results = run_data_parallel(worker_process, shards, args.num_gpus, args)
 
     # Save results
     print(f"\nSaving {len(merged_results)} results to {args.output_file}...")
-    Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output_file, 'w', encoding='utf-8') as f:
-        for result in merged_results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    save_merged_results(merged_results, args.output_file)
 
     print(f"\n{'='*80}")
     print(f"Done! Processed {len(merged_results)} problems with {args.num_gpus} GPUs.")

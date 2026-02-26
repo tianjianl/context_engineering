@@ -16,18 +16,19 @@ Key differences from agentic_refinement.py:
 
 import argparse
 import json
-import csv
 import os
 import torch
 import multiprocessing as mp
-from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from pathlib import Path
-import urllib.request
 
+from inference.data_utils import load_dataset
+from inference.dp_utils import (
+    detect_gpus, shard_data, run_data_parallel, save_merged_results,
+    SampleState, save_intermediate_results,
+)
+from inference.args_utils import add_common_args, add_dp_args, validate_args
 
-# Dataset URLs
-IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
 
 # Tool definition for llm_refine
 LLM_REFINE_TOOL = {
@@ -35,8 +36,7 @@ LLM_REFINE_TOOL = {
     "function": {
         "name": "llm_refine",
         "description": (
-            "Summarize your progress and continue with a fresh start. "
-            "Call after each major reasoning step."
+            "Compress your work into a summary and continue solving with a fresh context window."
         ),
         "parameters": {"type": "object", "properties": {}}
     }
@@ -44,61 +44,16 @@ LLM_REFINE_TOOL = {
 
 # Default system prompt
 DEFAULT_SYSTEM_PROMPT = """\
-You are a mathematical reasoning assistant. You have a tool `llm_refine` that \
-summarizes your work so far. After calling it, you continue solving with a fresh \
-perspective while retaining key insights. Call it after each major reasoning step. \
+You are a mathematical reasoning assistant. Solve the given problem step by step. \
 Present your final answer using \\boxed{} notation.\
 """
 
-LLM_REFINE_USER_HINT = """
-
-You have `llm_refine` — call it after each major reasoning step to checkpoint your progress."""
+LLM_REFINE_USER_HINT = ""
 
 
 # ============================================================
-# Data loading utilities
+# Prompt construction using tokenizer's apply_chat_template
 # ============================================================
-
-def download_imobench(cache_dir: str) -> str:
-    """Download IMOBench (AnswerBench) CSV if not already cached."""
-    cache_path = Path(cache_dir) / "answerbench.csv"
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    if not cache_path.exists():
-        print(f"Downloading IMOBench from {IMOBENCH_URL}...")
-        urllib.request.urlretrieve(IMOBENCH_URL, cache_path)
-        print(f"Saved to {cache_path}")
-    else:
-        print(f"Loading IMOBench from {cache_path}")
-    return str(cache_path)
-
-
-def load_imobench(csv_path: str) -> List[Dict]:
-    """Load data from IMOBench (AnswerBench) CSV file."""
-    data = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            data.append({
-                "problem_id": row.get("Problem ID", ""),
-                "prompt": row.get("Problem", ""),
-                "answer": row.get("Short Answer", ""),
-                "category": row.get("Category", ""),
-                "subcategory": row.get("Subcategory", ""),
-                "source": row.get("Source", "")
-            })
-    return data
-
-
-def load_jsonl(file_path: str) -> List[Dict]:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
 
 def create_summarization_prompt(original_prompt: str, existing_summary: str,
                                 latest_reasoning: str) -> str:
@@ -107,17 +62,9 @@ def create_summarization_prompt(original_prompt: str, existing_summary: str,
     Produces a first-person, descriptive summary (max 2 paragraphs) that
     captures the reasoning progress without adding new analysis.
     """
-    return f"""You are given a maths problem and a candidate solution to it. You may also be given a summary of a previous candidate solution to the problem. If this is provided, you may assume that the current candidate solution was generated conditioned on the summary of the previous candidate solution.
-Your task is to write a summary of the current candidate solution.
+    return f"""Summarize the candidate solution to the problem below. Retain key intermediate results, calculations, and conclusions. Incorporate any existing summary.
 
-The new summary you generate should possess the following characteristics:
-- It should provide a detailed overview of what occurred in the current candidate solution. This may include a summary of the high-level problem-solving strategy, a description of theorems used, verification attempts, calculations and logical deductions etc.
-- It should summarize the current candidate solution in light of any previous summaries, if provided. We should be able to understand the relationship between the previous solution and the current solution by reading the summary. Make sure any important information contained in the existing summary is retained in the new one.
-- It should be no more than two paragraphs long and written in paragraph form, without headers or subheaders.
-- It should be written in the first person, as if though it is being written by the person solving the problem.
-- The candidate solution may not be complete. In this case, the summary should still attempt to summarize the partial solution.
-
-IMPORTANT: Do not under any circumstances add any additional reasoning not contained in the latest reasoning step. Your task is only to summarize what is given to you.
+Do NOT copy verbatim. Do NOT add new reasoning. Write at most two paragraphs in first person.
 
 ### PROBLEM
 {original_prompt}
@@ -128,10 +75,6 @@ IMPORTANT: Do not under any circumstances add any additional reasoning not conta
 ### LATEST CANDIDATE SOLUTION
 {latest_reasoning}"""
 
-
-# ============================================================
-# Prompt construction using tokenizer's apply_chat_template
-# ============================================================
 
 def build_initial_messages(problem: str, system_prompt: str,
                            include_tool_hint: bool = True) -> List[Dict]:
@@ -245,70 +188,6 @@ class APIRefiner:
             )
             results.append(response.choices[0].message.content)
         return results
-
-
-# ============================================================
-# State tracking
-# ============================================================
-
-@dataclass
-class SampleState:
-    """Tracks the agent loop state for a single (question, sample) pair."""
-    q_idx: int
-    s_idx: int
-    original_prompt: str
-    conversation_turns: List[Dict] = field(default_factory=list)
-    rounds_data: List[Dict] = field(default_factory=list)
-    is_done: bool = False
-    done_reason: str = ""
-    num_tool_calls: int = 0
-    last_refined_context: str = ""
-
-
-# ============================================================
-# Intermediate saving
-# ============================================================
-
-def save_intermediate_results(gpu_id: int, valid_items: List[Dict],
-                              original_prompts: List[str],
-                              all_states: List[List[SampleState]],
-                              num_samples: int, round_num: int,
-                              output_file: str):
-    """Save intermediate results for this GPU after a round completes."""
-    results = []
-    for q_idx, (item, orig_prompt) in enumerate(zip(valid_items, original_prompts)):
-        samples = []
-        for s_idx in range(num_samples):
-            state = all_states[q_idx][s_idx]
-            rounds_data = state.rounds_data
-            sample_result = {
-                "sample_idx": s_idx,
-                "rounds": rounds_data,
-                "final_refined_context": state.last_refined_context,
-                "full_assistant_message": (
-                    state.last_refined_context + rounds_data[-1]["current_round_generation"]
-                    if rounds_data else ""
-                ),
-                "num_tool_calls": state.num_tool_calls,
-                "done_reason": state.done_reason,
-            }
-            samples.append(sample_result)
-
-        result = {
-            "original_prompt": orig_prompt,
-            "num_samples": num_samples,
-            "samples": samples,
-            **{k: v for k, v in item.items() if k != "prompt"}
-        }
-        results.append(result)
-
-    output_path = Path(output_file)
-    intermediate_file = output_path.parent / f"{output_path.stem}_intermediate_gpu{gpu_id}.jsonl"
-    intermediate_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(intermediate_file, 'w', encoding='utf-8') as f:
-        for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
-    print(f"[GPU {gpu_id}] Saved intermediate results after round {round_num + 1} to {intermediate_file}")
 
 
 # ============================================================
@@ -612,16 +491,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Tool-calling LLM refinement with vLLM Data Parallelism"
     )
-    parser.add_argument(
-        "--dataset", type=str, choices=["hmmt", "imobench"], required=True,
-        help="Dataset to use"
-    )
-    parser.add_argument("--input_file", type=str, default=None,
-                        help="Input JSONL file (required for hmmt)")
-    parser.add_argument("--cache_dir", type=str,
-                        default="/scratch/dkhasha1/tli104/imobench")
-    parser.add_argument("--model", type=str,
-                        default="Qwen/Qwen3-4B-Instruct-2507")
+    add_common_args(parser)
+    add_dp_args(parser)
+
+    # Tool refinement-specific args
     parser.add_argument("--refiner_model", type=str, default=None,
                         help="Refiner model name (default: same as --model). "
                              "Used with --refiner_base_url for API refiner.")
@@ -629,15 +502,8 @@ def main():
                         help="Base URL for external refiner vLLM server "
                              "(e.g., http://localhost:8000/v1). "
                              "If not set, uses local vLLM instance.")
-    parser.add_argument("--num_tokens", type=int, required=True,
-                        help="Max tokens per generation step")
-    parser.add_argument("--output_file", type=str, default="output_tool_refinement.jsonl")
     parser.add_argument("--max_rounds", type=int, default=12,
                         help="Maximum number of generation rounds (default: 12)")
-    parser.add_argument("--num_samples", type=int, default=1,
-                        help="Number of samples per question (default: 1)")
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--max_refinement_tokens", type=int, default=None,
                         help="Max tokens for refinement (default: 16384)")
     # Legacy flags (no longer used — summarization is always descriptive)
@@ -645,9 +511,6 @@ def main():
                         help="(deprecated, no-op)")
     parser.add_argument("--strip_answer", action="store_true",
                         help="(deprecated, no-op)")
-    parser.add_argument("--num_gpus", type=int, default=None)
-    parser.add_argument("--max_model_len", type=int, default=None)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.95)
     parser.add_argument("--compact_context", action="store_true",
                         help="Only keep prompt + latest summary in context "
                              "(removes generation from conversation history)")
@@ -671,20 +534,16 @@ def main():
             131072
         )
 
-    if args.dataset == "hmmt" and args.input_file is None:
-        parser.error("--input_file is required when using --dataset hmmt")
+    validate_args(args, parser)
 
     # Detect GPUs
-    num_gpus = torch.cuda.device_count()
-    if args.num_gpus is None:
-        args.num_gpus = num_gpus
-    else:
-        args.num_gpus = min(args.num_gpus, num_gpus)
+    num_gpus = detect_gpus(args.num_gpus)
+    args.num_gpus = num_gpus
 
     print(f"\n{'='*80}")
     print(f"Tool-Calling Refinement - Data Parallel Inference")
     print(f"{'='*80}")
-    print(f"Available GPUs: {num_gpus}")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
     print(f"Using GPUs: {args.num_gpus}")
     print(f"Model: {args.model}")
     print(f"Refiner: {'API @ ' + args.refiner_base_url if args.refiner_base_url else 'Local (same model)'}")
@@ -700,61 +559,19 @@ def main():
 
     # Load data
     print(f"Loading Dataset: {args.dataset.upper()}")
-    if args.dataset == "imobench":
-        if args.input_file:
-            data = load_jsonl(args.input_file)
-        else:
-            csv_path = download_imobench(args.cache_dir)
-            data = load_imobench(csv_path)
-    elif args.dataset == "hmmt":
-        data = load_jsonl(args.input_file)
-
+    data = load_dataset(args.dataset, args.input_file, args.cache_dir)
     print(f"Loaded {len(data)} problems")
 
     # Shard data across GPUs
-    shards = [[] for _ in range(args.num_gpus)]
-    for i, item in enumerate(data):
-        shards[i % args.num_gpus].append(item)
+    shards = shard_data(data, args.num_gpus)
     print(f"Data sharding: {[len(s) for s in shards]}")
 
-    # Start worker processes
-    mp.set_start_method('spawn', force=True)
-    result_queue = mp.Queue()
-    processes = []
-
-    for gpu_id in range(args.num_gpus):
-        p = mp.Process(
-            target=worker_process,
-            args=(gpu_id, shards[gpu_id], args, result_queue)
-        )
-        p.start()
-        processes.append(p)
-
-    # Collect results
-    all_results = {}
-    for _ in range(args.num_gpus):
-        gpu_id, results = result_queue.get()
-        all_results[gpu_id] = results
-        print(f"[Main] Received {len(results)} results from GPU {gpu_id}")
-
-    for p in processes:
-        p.join()
-
-    # Merge results maintaining original order
-    merged_results = []
-    indices = [0] * args.num_gpus
-    for i in range(len(data)):
-        gpu_id = i % args.num_gpus
-        if indices[gpu_id] < len(all_results[gpu_id]):
-            merged_results.append(all_results[gpu_id][indices[gpu_id]])
-            indices[gpu_id] += 1
+    # Run data parallel inference
+    merged_results = run_data_parallel(worker_process, shards, args.num_gpus, args)
 
     # Save results
     print(f"\nSaving {len(merged_results)} results to {args.output_file}...")
-    Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output_file, 'w', encoding='utf-8') as f:
-        for result in merged_results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    save_merged_results(merged_results, args.output_file)
 
     # Summary stats
     total_tool_calls = sum(
