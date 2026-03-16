@@ -30,23 +30,15 @@ from inference.dp_utils import (
 from inference.args_utils import add_common_args, add_dp_args, validate_args
 
 
-# Tool definition for llm_refine
-LLM_REFINE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "llm_refine",
-        "description": (
-            "Compress your work into a summary and continue solving with a fresh context window."
-        ),
-        "parameters": {"type": "object", "properties": {}}
-    }
-}
+# Import shared prompts so training and inference use identical formats
+from training.tool_refinement_rl.prompts import (
+    LLM_REFINE_TOOL,
+    SYSTEM_PROMPT as _TRAINING_SYSTEM_PROMPT,
+    CONTINUATION_INSTRUCTIONS,
+    create_summarization_prompt as _training_summarization_prompt,
+)
 
-# Default system prompt
-DEFAULT_SYSTEM_PROMPT = """\
-You are a mathematical reasoning assistant. Solve the given problem step by step. \
-Present your final answer using \\boxed{} notation.\
-"""
+DEFAULT_SYSTEM_PROMPT = _TRAINING_SYSTEM_PROMPT
 
 LLM_REFINE_USER_HINT = ""
 
@@ -56,15 +48,22 @@ LLM_REFINE_USER_HINT = ""
 # ============================================================
 
 def create_summarization_prompt(original_prompt: str, existing_summary: str,
-                                latest_reasoning: str) -> str:
-    """Create an RC-style summarization prompt.
+                                latest_reasoning: str,
+                                critical: bool = False) -> str:
+    """Create a summarization prompt.
 
-    Produces a first-person, descriptive summary (max 2 paragraphs) that
-    captures the reasoning progress without adding new analysis.
+    Uses the shared training prompt by default (faithful summary).
+    Critical mode uses an error-finding prompt instead.
     """
-    return f"""Summarize the candidate solution to the problem below. Retain key intermediate results, calculations, and conclusions. Incorporate any existing summary.
+    if critical:
+        return f"""Critically evaluate the candidate solution to the problem below. Your job is to find errors, not to summarize faithfully.
 
-Do NOT copy verbatim. Do NOT add new reasoning. Write at most two paragraphs in first person.
+1. Check each calculation and logical step for correctness. Flag any errors explicitly.
+2. Identify any unjustified assumptions or missing cases.
+3. If the answer seems wrong, suggest a different approach.
+4. Retain only the intermediate results that are VERIFIED correct.
+
+Do NOT include a final \\boxed{{}} answer. Write at most two paragraphs in first person.
 
 ### PROBLEM
 {original_prompt}
@@ -74,6 +73,13 @@ Do NOT copy verbatim. Do NOT add new reasoning. Write at most two paragraphs in 
 
 ### LATEST CANDIDATE SOLUTION
 {latest_reasoning}"""
+    else:
+        # Use the same prompt as training data generation
+        return _training_summarization_prompt(
+            original_prompt=original_prompt,
+            existing_summary=existing_summary,
+            latest_reasoning=latest_reasoning,
+        )
 
 
 def build_initial_messages(problem: str, system_prompt: str,
@@ -109,10 +115,11 @@ def render_prompt(tokenizer, messages: List[Dict], tools: List[Dict]) -> str:
 
 def render_summarization_prompt(tokenizer, problem: str,
                                 existing_summary: str,
-                                latest_reasoning: str) -> str:
+                                latest_reasoning: str,
+                                critical: bool = False) -> str:
     """Build the summarization prompt (no tools, plain chat template)."""
     summarization_text = create_summarization_prompt(
-        problem, existing_summary, latest_reasoning
+        problem, existing_summary, latest_reasoning, critical=critical
     )
     messages = [{"role": "user", "content": summarization_text}]
     return tokenizer.apply_chat_template(
@@ -127,25 +134,18 @@ def render_summarization_prompt(tokenizer, problem: str,
 class LocalRefiner:
     """Uses the same vLLM LLM instance for summarization."""
 
-    def __init__(self, llm, tokenizer, sampling_params):
+    def __init__(self, llm, tokenizer, sampling_params, critical: bool = False):
         self.llm = llm
         self.tokenizer = tokenizer
         self.sampling_params = sampling_params
+        self.critical = critical
 
     def refine_batch(self, batch: List[Dict]) -> List[str]:
-        """Summarize a batch using RC-style summarization.
-
-        Args:
-            batch: List of dicts with keys 'original_prompt',
-                   'existing_summary', and 'latest_reasoning'
-
-        Returns:
-            List of summary strings
-        """
         prompts = [
             render_summarization_prompt(
                 self.tokenizer, item["original_prompt"],
-                item["existing_summary"], item["latest_reasoning"]
+                item["existing_summary"], item["latest_reasoning"],
+                critical=self.critical,
             )
             for item in batch
         ]
@@ -157,28 +157,20 @@ class APIRefiner:
     """Calls an external vLLM server via OpenAI-compatible API for summarization."""
 
     def __init__(self, base_url: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 16384):
+                 max_tokens: int = 16384, critical: bool = False):
         from openai import OpenAI
         self.client = OpenAI(base_url=base_url, api_key="dummy")
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.critical = critical
 
     def refine_batch(self, batch: List[Dict]) -> List[str]:
-        """Summarize a batch by calling the API sequentially.
-
-        Args:
-            batch: List of dicts with keys 'original_prompt',
-                   'existing_summary', and 'latest_reasoning'
-
-        Returns:
-            List of summary strings
-        """
         results = []
         for item in batch:
             summarization_text = create_summarization_prompt(
                 item["original_prompt"], item["existing_summary"],
-                item["latest_reasoning"]
+                item["latest_reasoning"], critical=self.critical,
             )
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -245,21 +237,24 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
     )
 
     # Initialize refiner
+    critical = getattr(args, 'critical_summary', False)
     if args.refiner_base_url:
         refiner_model = args.refiner_model or args.model
-        print(f"[GPU {gpu_id}] Using API refiner: {args.refiner_base_url} model={refiner_model}")
+        print(f"[GPU {gpu_id}] Using API refiner: {args.refiner_base_url} model={refiner_model} critical={critical}")
         refiner = APIRefiner(
             base_url=args.refiner_base_url,
             model=refiner_model,
             temperature=args.temperature,
             max_tokens=args.max_refinement_tokens,
+            critical=critical,
         )
     else:
-        print(f"[GPU {gpu_id}] Using local refiner (same vLLM instance)")
+        print(f"[GPU {gpu_id}] Using local refiner (same vLLM instance) critical={critical}")
         refiner = LocalRefiner(
             llm=llm,
             tokenizer=tokenizer,
             sampling_params=refinement_sampling_params,
+            critical=critical,
         )
 
     system_prompt = args.system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -336,13 +331,8 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
 
             refined_texts = refiner.refine_batch(refine_batch)
 
-            # RC-style continuation instructions
-            continuation_instructions = (
-                "\n\nContinue solving the problem, improving upon the "
-                "summary above. You may verify previous conclusions, try a "
-                "different approach, or build on the progress so far.\n"
-                "Return your final answer in \\boxed{}."
-            )
+            # Use shared continuation instructions (matches SFT training data)
+            continuation_instructions = CONTINUATION_INSTRUCTIONS
 
             for state, refined in zip(needs_refinement, refined_texts):
                 # Update state
@@ -358,10 +348,12 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                     # Reset conversation_turns each round (RC-style).
                     # Keep last generation in assistant turn to match training format
                     # (training always has [generation text] + <tool_call> together).
+                    # Tool response content includes continuation instructions inside
+                    # <tool_response> tags to match training data format.
                     state.conversation_turns = [
                         {"role": "assistant", "content": last_round["current_round_generation"] + '\n<tool_call>\n{"name": "llm_refine", "arguments": {}}\n</tool_call>'},
-                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"
-                         + continuation_instructions},
+                        {"role": "user", "content": f"<tool_response>\n{refined}"
+                         + continuation_instructions + "\n</tool_response>"},
                     ]
                 else:
                     # Default: accumulate full generation history
@@ -373,8 +365,8 @@ def worker_process(gpu_id: int, data_shard: List[Dict], args, result_queue: mp.Q
                         {"role": "assistant", "content": assistant_content}
                     )
                     state.conversation_turns.append(
-                        {"role": "user", "content": f"<tool_response>\n{refined}\n</tool_response>"
-                         + continuation_instructions}
+                        {"role": "user", "content": f"<tool_response>\n{refined}"
+                         + continuation_instructions + "\n</tool_response>"}
                     )
 
         # Save intermediate results
@@ -514,6 +506,9 @@ def main():
     parser.add_argument("--compact_context", action="store_true",
                         help="Only keep prompt + latest summary in context "
                              "(removes generation from conversation history)")
+    parser.add_argument("--critical_summary", action="store_true",
+                        help="Use critical evaluation prompt instead of faithful summary. "
+                             "Summary identifies errors and suggests improvements.")
     parser.add_argument("--system_prompt", type=str, default=None,
                         help="Override default system prompt")
     parser.add_argument("--system_prompt_file", type=str, default=None,
@@ -555,6 +550,7 @@ def main():
     print(f"Max Rounds: {args.max_rounds}")
     print(f"Num Samples: {args.num_samples}")
     print(f"Compact Context: {args.compact_context}")
+    print(f"Critical Summary: {args.critical_summary}")
     print(f"{'='*80}\n")
 
     # Load data

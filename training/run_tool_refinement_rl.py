@@ -1,11 +1,17 @@
 """
-DAPO RL training on H100s with Qwen3-4B-Instruct-2507.
+Tool Refinement RL training on H100s with Qwen3-4B-Instruct-2507.
+
+Trains the model via GRPO to learn when/how to use the llm_refine tool
+for iterative context compression during math problem solving.
+
+Based on run_dapo_h100.py with custom generate function for multi-turn
+tool-calling rollouts.
 
 Single node:
-    python run_dapo_h100.py
+    python run_tool_refinement_rl.py
 
 Multi-node (via SLURM, run on each node):
-    python run_dapo_h100.py
+    python run_tool_refinement_rl.py
     SLURM_JOB_NUM_NODES is read automatically.
 """
 
@@ -37,15 +43,26 @@ class ScriptArgs(U.ExecuteTrainConfig):
     enable_eval: bool = True
     disable_grpo_std_norm: bool = False
     disable_rewards_norm: bool = False
+    model_path: str = None  # Custom HF model path (e.g. SFT checkpoint). Defaults to base model.
     dataset_path: str = f"{SCRATCH}/datasets/dapo-math-17k/dapo-math-17k.jsonl"
-    max_response_len: int = 16384
-    lr: str = "1e-6"
     wandb_project: str = None
-    use_tool_reward: bool = False  # Use same reward function as tool RL (for fair comparison)
+    lr: str = "1e-6"
+    global_batch_size: int = 512
+
+
+def _get_model_paths(args: ScriptArgs):
+    """Return (hf_path, torch_dist_path) based on model_path or default."""
+    if args.model_path:
+        hf_path = args.model_path.rstrip("/")
+        torch_dist_path = f"{hf_path}_torch_dist"
+    else:
+        hf_path = f"{SCRATCH}/models/{MODEL_NAME}"
+        torch_dist_path = f"{SCRATCH}/models/{MODEL_NAME}_torch_dist"
+    return hf_path, torch_dist_path
 
 
 def prepare(args: ScriptArgs):
-    dst = f"{SCRATCH}/models/{MODEL_NAME}_torch_dist"
+    hf_path, dst = _get_model_paths(args)
     if os.path.exists(dst):
         print(f"Skipping conversion — {dst} already exists")
         return
@@ -70,57 +87,60 @@ def prepare(args: ScriptArgs):
         f"{multinode_args}"
         f"{slime_dir}/tools/convert_hf_to_torch_dist.py "
         f"${{MODEL_ARGS[@]}} "
-        f"--hf-checkpoint {SCRATCH}/models/{MODEL_NAME} "
+        f"--hf-checkpoint {hf_path} "
         f"--save {dst}"
     )
 
 
 def execute(args: ScriptArgs):
-    load_save_path = f"{SCRATCH}/outputs/dapo_{MODEL_NAME}_{args.run_id}/checkpoints"
-    dump_path = f"{SCRATCH}/outputs/dapo_{MODEL_NAME}_{args.run_id}/dump_details"
+    load_save_path = f"{SCRATCH}/outputs/tool_ref_rl_{MODEL_NAME}_{args.run_id}_bs{args.global_batch_size}_lr{args.lr}/checkpoints"
+    dump_path = f"{SCRATCH}/outputs/tool_ref_rl_{MODEL_NAME}_{args.run_id}_bs{args.global_batch_size}_lr{args.lr}/dump_details"
 
+    hf_path, torch_dist_path = _get_model_paths(args)
     ckpt_args = (
-        f"--hf-checkpoint {SCRATCH}/models/{MODEL_NAME} "
-        f"--ref-load {SCRATCH}/models/{MODEL_NAME}_torch_dist "
+        f"--hf-checkpoint {hf_path} "
+        f"--ref-load {torch_dist_path} "
         f"--load {load_save_path} "
         f"--save {load_save_path} "
         f"--save-interval {2 if args.mode == 'debug_minimal' else 20} "
         f"--save-retain-interval {2 if args.mode == 'debug_minimal' else 20} "
     )
 
-    # Custom reward function (same as tool RL, but with zero tool bonus)
+    # Custom generate function for multi-turn tool refinement.
+    # NOTE: --apply-chat-template is NOT used — the custom generate function
+    # handles chat template formatting internally (with tools=[LLM_REFINE_TOOL]).
     tool_ref_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "tool_refinement_rl"
     )
-    custom_args = ""
-    if args.use_tool_reward:
-        custom_args = (
-            "--custom-rm-path reward.reward_func "
-            "--custom-rollout-log-function-path log_rewards.log_rollout "
-            "--custom-eval-rollout-log-function-path log_rewards.log_eval_rollout "
-        )
+    custom_args = (
+        f"--custom-generate-function-path generate.generate "
+        f"--custom-rm-path reward.reward_func "
+        f"--custom-rollout-log-function-path log_rewards.log_rollout "
+        f"--custom-eval-rollout-log-function-path log_rewards.log_eval_rollout "
+    )
 
     debug = args.mode == "debug_minimal"
     rollout_args = (
         f"--prompt-data {args.dataset_path} "
         "--input-key prompt "
         "--label-key label "
-        "--apply-chat-template "
+        # No --apply-chat-template: custom generate handles formatting
         "--rollout-shuffle "
         "--rm-type dapo "
         "--reward-key score "
         f"--num-rollout {10 if debug else 3000} "
         f"--rollout-batch-size {4 if debug else 256} "
         f"--n-samples-per-prompt {4 if debug else 8} "
-        f"--rollout-max-response-len {100 if debug else args.max_response_len} "
+        # Longer max response for multi-turn (5 rounds × ~4K tokens + summaries)
+        f"--rollout-max-response-len {200 if debug else 16384} "
         "--rollout-temperature 1.0 "
-        f"--global-batch-size {16 if debug else 512} "
+        f"--global-batch-size {16 if debug else args.global_batch_size} "
         "--balance-data "
     )
 
     if args.dynamic_sampling and args.mode != "debug_minimal":
         rollout_args += (
-            "--over-sampling-batch-size 256 "
+            "--over-sampling-batch-size 64 "
             "--dynamic-sampling-filter-path "
             "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         )
@@ -156,9 +176,10 @@ def execute(args: ScriptArgs):
         "--adam-beta2 0.98 "
     )
 
-    # Megatron parallelism for 4B model on 4 H100s (per node):
-    #   TP=2, CP=2 → 2×2=4 GPUs per actor replica
-    tp = 2
+    # Megatron parallelism for 4B model:
+    #   H200 (4 GPUs): TP=1, CP=2 → 2 GPUs per actor replica (2 replicas)
+    #   A100 (8 GPUs): TP=2, CP=4 → 8 GPUs per actor replica
+    tp = 1 if args.num_gpus_per_node == 4 else 2
     cp = args.num_gpus_per_node // tp
     train_backend_args = (
         f"--tensor-model-parallel-size {tp} "
@@ -178,13 +199,15 @@ def execute(args: ScriptArgs):
         "--train-memory-margin-bytes 3221225472 "
     )
 
+    # Lower sglang-mem-fraction-static for longer KV caches
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-chunked-prefill-size 4096 "
-        f"--sglang-mem-fraction-static {0.6 if args.max_response_len > 8192 else 0.7} "
+        "--sglang-mem-fraction-static 0.6 "
     )
 
-    perf_args = f"--use-dynamic-batch-size --max-tokens-per-gpu {args.max_response_len + 1024} "
+    # Higher max-tokens-per-gpu for longer multi-turn sequences
+    perf_args = "--use-dynamic-batch-size --max-tokens-per-gpu 16384 "
 
     misc_args = (
         f"--actor-num-nodes {args.num_nodes} "
@@ -218,8 +241,8 @@ def execute(args: ScriptArgs):
         megatron_model_type=MEGATRON_MODEL_TYPE,
         train_script=os.path.join(slime_dir, "train.py"),
         extra_env_vars={
-            "PYTHONPATH": f"{megatron_dir}" + (f":{tool_ref_dir}" if args.use_tool_reward else ""),
-            **({"TOOL_BONUS_CORRECT": "0.0", "TOOL_BONUS_WRONG": "0.0"} if args.use_tool_reward else {}),
+            "PYTHONPATH": f"{megatron_dir}:{tool_ref_dir}",
+            **({"WANDB_MODE": os.environ["WANDB_MODE"]} if os.environ.get("WANDB_MODE") else {}),
         },
     )
 

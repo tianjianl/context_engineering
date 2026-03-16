@@ -157,6 +157,8 @@ def _init_wandb_common():
     wandb.define_metric("eval/step")
     wandb.define_metric("eval/*", step_metric="eval/step")
     wandb.define_metric("perf/*", step_metric="rollout/step")
+    wandb.define_metric("reward/*", step_metric="rollout/step")
+    wandb.define_metric("tool_ref/*", step_metric="rollout/step")
 
 
 def get_wandb_offline_dir(args):

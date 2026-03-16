@@ -1,4 +1,6 @@
-Check RL training internals for all currently running RL jobs. Summarize progress, eval performance, and spot issues.
+Check RL training internals for all currently running RL jobs. Produce a concise table summary of progress and AIME test metrics.
+
+Do not ask for permission — run all commands directly.
 
 Steps:
 1. Run `squeue -u tli104 -p a100,h100,h200 -o "%.10i %.30j %.10P %.8T %.12M" | grep -i "tool_rl\|grpo"` to find running RL jobs.
@@ -11,11 +13,23 @@ Steps:
 4. If there are multiple running jobs, run a head-to-head comparison:
    - Run: `python3 /weka/home/tli104/context_engineering/scripts/check_rl_metrics.py <job_id_1> <job_id_2> ...` (pass all job IDs)
    - This produces a side-by-side table of AIME eval scores and rollout rewards across jobs.
-5. Summarize findings:
-   - **Progress**: rollouts completed, reward trend, eval scores
-   - **Tool behavior**: tool call rate, positioning (before vs after answer), accuracy with vs without tools
-   - **Issues**: length growth, truncation, reward stagnation, entropy collapse, grad norm spikes, repetition, zero advantage (normalized rewards stuck at 0), tool calls after answer
-   - **Comparison**: if multiple RL jobs running, compare their metrics side by side
+5. Present a **table summary** in markdown with the following columns for each job:
+
+### Progress Table
+
+| Job ID | Name | Rollouts | Reward (start) | Reward (end) | Delta | Resp Len (start) | Resp Len (end) | Trunc% | Rep% |
+|--------|------|----------|----------------|--------------|-------|-------------------|----------------|--------|------|
+
+### AIME Test Metrics Table
+
+| Job ID | Name | Eval Step | AIME Score | Resp Len | Trunc% | Rep% |
+|--------|------|-----------|------------|----------|--------|------|
+
+For each job, show ALL eval steps so the AIME score trajectory is visible.
+
+### Health Issues
+
+List any warnings from the health check (length growth, reward stagnation, entropy collapse, high clip fraction, grad norm spikes, high repetition, zero advantage).
 
 Key metrics to watch:
 - `rollout/raw_reward`: should trend upward

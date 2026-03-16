@@ -13,10 +13,11 @@ Set GEMINI_API_KEY environment variable before running.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -25,6 +26,8 @@ try:
 except ImportError:
     print("Error: google-genai not installed. Install with: pip install google-genai")
     sys.exit(1)
+
+from inference.data_utils import load_jsonl
 
 
 ANNOTATION_PROMPT = """\
@@ -81,17 +84,6 @@ You may include 1-5 annotations. Focus on the most impactful missed opportunitie
 """
 
 
-def load_jsonl(file_path: str) -> List[Dict]:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
-
 def format_trajectory(sample: Dict) -> str:
     """Format a sample's trajectory into readable text for Gemini."""
     parts = []
@@ -132,8 +124,6 @@ def format_trajectory(sample: Dict) -> str:
 
 def parse_annotations(text: str) -> Optional[Dict]:
     """Parse Gemini's XML annotation response."""
-    import re
-
     summary_match = re.search(r'<summary>(.*?)</summary>', text, re.DOTALL)
     summary = summary_match.group(1).strip() if summary_match else ""
 

@@ -1,0 +1,218 @@
+run,metric,step,value
+Tool RL + Bonus,raw_reward,5,0.055762
+Tool RL + Bonus,raw_reward,7,0.062402
+Tool RL + Bonus,raw_reward,8,0.094043
+Tool RL + Bonus,raw_reward,9,0.155859
+Tool RL + Bonus,raw_reward,10,0.083057
+Tool RL + Bonus,raw_reward,11,0.059229
+Tool RL + Bonus,raw_reward,12,0.051855
+Tool RL + Bonus,raw_reward,13,0.195020
+Tool RL + Bonus,raw_reward,14,0.100049
+Tool RL + Bonus,raw_reward,15,0.142236
+Tool RL + Bonus,raw_reward,16,0.128271
+Tool RL + Bonus,raw_reward,17,0.195947
+Tool RL + Bonus,raw_reward,18,0.149951
+Tool RL + Bonus,raw_reward,19,0.216650
+Tool RL + Bonus,raw_reward,20,0.188330
+Tool RL + Bonus,raw_reward,21,0.258740
+Tool RL + Bonus,raw_reward,22,0.154150
+Tool RL + Bonus,raw_reward,23,0.155713
+Tool RL + Bonus,raw_reward,24,0.244141
+Tool RL + Bonus,raw_reward,25,0.186670
+Tool RL + Bonus,raw_reward,26,0.250684
+Tool RL + Bonus,raw_reward,27,0.285156
+Tool RL + Bonus,raw_reward,28,0.196924
+Tool RL + Bonus,raw_reward,29,0.178857
+Tool RL + Bonus,raw_reward,30,0.222705
+Tool RL + Bonus,raw_reward,31,0.238232
+Tool RL + Bonus,raw_reward,32,0.312109
+Tool RL + Bonus,raw_reward,33,0.208398
+Tool RL + Bonus,raw_reward,34,0.117627
+Tool RL + Bonus,raw_reward,35,0.252734
+Tool RL + Bonus,raw_reward,36,0.254346
+Tool RL + Bonus,raw_reward,37,0.265918
+Tool RL + Bonus,raw_reward,38,0.222656
+Tool RL + Bonus,sample_acc_rolling,0,0.0000
+Tool RL + Bonus,sample_acc_rolling,1,0.0000
+Tool RL + Bonus,sample_acc_rolling,2,0.0000
+Tool RL + Bonus,sample_acc_rolling,3,0.2500
+Tool RL + Bonus,sample_acc_rolling,4,0.2000
+Tool RL + Bonus,sample_acc_rolling,5,0.2000
+Tool RL + Bonus,sample_acc_rolling,6,0.2000
+Tool RL + Bonus,sample_acc_rolling,7,0.4000
+Tool RL + Bonus,sample_acc_rolling,8,0.2000
+Tool RL + Bonus,sample_acc_rolling,9,0.4000
+Tool RL + Bonus,sample_acc_rolling,10,0.6000
+Tool RL + Bonus,sample_acc_rolling,11,0.6000
+Tool RL + Bonus,sample_acc_rolling,12,0.4000
+Tool RL + Bonus,sample_acc_rolling,13,0.4000
+Tool RL + Bonus,sample_acc_rolling,14,0.2000
+Tool RL + Bonus,sample_acc_rolling,15,0.0000
+Tool RL + Bonus,sample_acc_rolling,16,0.2000
+Tool RL + Bonus,sample_acc_rolling,17,0.2000
+Tool RL + Bonus,sample_acc_rolling,18,0.2000
+Tool RL + Bonus,sample_acc_rolling,19,0.4000
+Tool RL + Bonus,sample_acc_rolling,20,0.4000
+Tool RL + Bonus,sample_acc_rolling,21,0.2000
+Tool RL + Bonus,sample_acc_rolling,22,0.2000
+Tool RL + Bonus,sample_acc_rolling,23,0.4000
+Tool RL + Bonus,sample_acc_rolling,24,0.2000
+Tool RL + Bonus,sample_acc_rolling,25,0.4000
+Tool RL + Bonus,sample_acc_rolling,26,0.4000
+Tool RL + Bonus,sample_acc_rolling,27,0.4000
+Tool RL + Bonus,sample_acc_rolling,28,0.2000
+Tool RL + Bonus,sample_acc_rolling,29,0.2000
+Tool RL + Bonus,sample_acc_rolling,30,0.0000
+Tool RL + Bonus,sample_acc_rolling,31,0.2000
+Tool RL + Bonus,sample_acc_rolling,32,0.2000
+Tool RL + Bonus,sample_acc_rolling,33,0.2000
+Tool RL + Bonus,sample_acc_rolling,34,0.2000
+Tool RL + Bonus,sample_acc_rolling,35,0.2000
+Tool RL + Bonus,sample_acc_rolling,36,0.0000
+Tool RL + Bonus,sample_acc_rolling,37,0.0000
+Tool RL + Bonus,sample_acc_rolling,38,0.0000
+Tool RL + Bonus,sample_acc_rolling,39,0.0000
+Tool RL + Bonus,sample_acc_rolling,40,0.2000
+Tool RL + Bonus,sample_acc_rolling,41,0.2000
+Tool RL + Bonus,sample_acc_rolling,42,0.2000
+Tool RL + Bonus,sample_acc_rolling,43,0.4000
+Tool RL + Bonus,sample_acc_rolling,44,0.4000
+Tool RL + Bonus,sample_acc_rolling,45,0.2000
+Tool RL + Bonus,sample_acc_rolling,46,0.2000
+Tool RL + Bonus,sample_acc_rolling,47,0.2000
+Tool RL + Bonus,sample_acc_rolling,48,0.0000
+Tool RL + Bonus,sample_acc_rolling,49,0.2000
+Tool RL + Bonus,sample_acc_rolling,50,0.2000
+Tool RL + Bonus,sample_acc_rolling,51,0.2000
+Tool RL + Bonus,sample_acc_rolling,52,0.2000
+Tool RL + Bonus,sample_acc_rolling,53,0.2000
+Tool RL + Bonus,sample_acc_rolling,54,0.2000
+Tool RL + Bonus,sample_acc_rolling,55,0.4000
+Tool RL + Bonus,sample_acc_rolling,56,0.4000
+Tool RL + Bonus,sample_acc_rolling,57,0.4000
+Tool RL + Bonus,sample_acc_rolling,58,0.4000
+Tool RL + Bonus,sample_acc_rolling,59,0.2000
+Tool RL + Bonus,sample_acc_rolling,60,0.0000
+Tool RL + Bonus,sample_acc_rolling,61,0.0000
+Tool RL + Bonus,sample_acc_rolling,62,0.2000
+Tool RL + Bonus,sample_acc_rolling,63,0.4000
+Tool RL + Bonus,sample_acc_rolling,64,0.6000
+Tool RL + Bonus,sample_acc_rolling,65,0.6000
+Tool RL + Bonus,sample_acc_rolling,66,0.6000
+Tool RL + Bonus,sample_acc_rolling,67,0.6000
+Tool RL + Bonus,sample_acc_rolling,68,0.4000
+Tool RL + Bonus,sample_acc_rolling,69,0.2000
+Tool RL + Bonus,sample_acc_rolling,70,0.2000
+Tool RL + Bonus,sample_acc_rolling,71,0.2000
+Tool RL + Bonus,sample_acc_rolling,72,0.2000
+Tool RL + Bonus,sample_acc_rolling,73,0.2000
+Tool RL + Bonus,sample_acc_rolling,74,0.4000
+Tool RL + Bonus,sample_acc_rolling,75,0.4000
+Tool RL + Bonus,sample_acc_rolling,76,0.4000
+Tool RL + Bonus,sample_acc_rolling,77,0.2000
+Tool RL + Bonus,sample_acc_rolling,78,0.2000
+Tool RL + Bonus,eval_aime,0,0.143125
+Tool RL + Bonus,eval_aime,19,0.589583
+Tool RL No Bonus,sample_acc_rolling,0,0.0000
+Tool RL No Bonus,sample_acc_rolling,1,0.0000
+Tool RL No Bonus,sample_acc_rolling,2,0.0000
+Tool RL No Bonus,sample_acc_rolling,3,0.2500
+Tool RL No Bonus,sample_acc_rolling,4,0.2000
+Tool RL No Bonus,sample_acc_rolling,5,0.4000
+Tool RL No Bonus,sample_acc_rolling,6,0.4000
+Tool RL No Bonus,sample_acc_rolling,7,0.4000
+Tool RL No Bonus,sample_acc_rolling,8,0.2000
+Tool RL No Bonus,sample_acc_rolling,9,0.2000
+Tool RL No Bonus,sample_acc_rolling,10,0.2000
+Tool RL No Bonus,sample_acc_rolling,11,0.4000
+Tool RL No Bonus,sample_acc_rolling,12,0.4000
+Tool RL No Bonus,sample_acc_rolling,13,0.4000
+Tool RL No Bonus,sample_acc_rolling,14,0.6000
+Tool RL No Bonus,sample_acc_rolling,15,0.4000
+Tool RL No Bonus,sample_acc_rolling,16,0.2000
+Tool RL No Bonus,sample_acc_rolling,17,0.2000
+Tool RL No Bonus,sample_acc_rolling,18,0.2000
+Tool RL No Bonus,sample_acc_rolling,19,0.0000
+Tool RL No Bonus,sample_acc_rolling,20,0.0000
+Tool RL No Bonus,sample_acc_rolling,21,0.0000
+Tool RL No Bonus,sample_acc_rolling,22,0.0000
+Tool RL No Bonus,sample_acc_rolling,23,0.0000
+Tool RL No Bonus,sample_acc_rolling,24,0.0000
+Tool RL No Bonus,sample_acc_rolling,25,0.0000
+Tool RL No Bonus,sample_acc_rolling,26,0.2000
+Tool RL No Bonus,sample_acc_rolling,27,0.4000
+Tool RL No Bonus,sample_acc_rolling,28,0.4000
+Tool RL No Bonus,sample_acc_rolling,29,0.4000
+Tool RL No Bonus,sample_acc_rolling,30,0.6000
+Tool RL No Bonus,sample_acc_rolling,31,0.4000
+Tool RL No Bonus,sample_acc_rolling,32,0.2000
+Tool RL No Bonus,sample_acc_rolling,33,0.2000
+Tool RL No Bonus,sample_acc_rolling,34,0.2000
+Tool RL No Bonus,sample_acc_rolling,35,0.2000
+Tool RL No Bonus,sample_acc_rolling,36,0.4000
+Tool RL No Bonus,sample_acc_rolling,37,0.4000
+Tool RL No Bonus,sample_acc_rolling,38,0.4000
+Tool RL No Bonus,sample_acc_rolling,39,0.4000
+Tool RL No Bonus,sample_acc_rolling,40,0.2000
+Tool RL No Bonus,sample_acc_rolling,41,0.0000
+Tool RL No Bonus,sample_acc_rolling,42,0.0000
+Tool RL No Bonus,sample_acc_rolling,43,0.0000
+Tool RL No Bonus,sample_acc_rolling,44,0.0000
+Tool RL No Bonus,sample_acc_rolling,45,0.0000
+Tool RL No Bonus,sample_acc_rolling,46,0.2000
+Tool RL No Bonus,sample_acc_rolling,47,0.2000
+Tool RL No Bonus,sample_acc_rolling,48,0.2000
+Tool RL No Bonus,sample_acc_rolling,49,0.4000
+Tool RL No Bonus,sample_acc_rolling,50,0.6000
+Tool RL No Bonus,eval_aime,0,-0.136458
+Tool RL No Bonus,eval_aime,19,0.233333
+Standard GRPO,sample_acc_rolling,0,0.0000
+Standard GRPO,sample_acc_rolling,1,0.0000
+Standard GRPO,sample_acc_rolling,2,0.0000
+Standard GRPO,sample_acc_rolling,3,0.0000
+Standard GRPO,sample_acc_rolling,4,0.0000
+Standard GRPO,sample_acc_rolling,5,0.0000
+Standard GRPO,sample_acc_rolling,6,0.0000
+Standard GRPO,sample_acc_rolling,7,0.0000
+Standard GRPO,sample_acc_rolling,8,0.0000
+Standard GRPO,sample_acc_rolling,9,0.0000
+Standard GRPO,sample_acc_rolling,10,0.0000
+Standard GRPO,sample_acc_rolling,11,0.0000
+Standard GRPO,sample_acc_rolling,12,0.0000
+Standard GRPO,sample_acc_rolling,13,0.0000
+Standard GRPO,sample_acc_rolling,14,0.0000
+Standard GRPO,sample_acc_rolling,15,0.0000
+Standard GRPO,sample_acc_rolling,16,0.0000
+Standard GRPO,sample_acc_rolling,17,0.0000
+Standard GRPO,sample_acc_rolling,18,0.2000
+Standard GRPO,sample_acc_rolling,19,0.2000
+Standard GRPO,sample_acc_rolling,20,0.2000
+Standard GRPO,sample_acc_rolling,21,0.2000
+Standard GRPO,sample_acc_rolling,22,0.2000
+Standard GRPO,sample_acc_rolling,23,0.0000
+Standard GRPO,sample_acc_rolling,24,0.0000
+Standard GRPO,sample_acc_rolling,25,0.0000
+Standard GRPO,sample_acc_rolling,26,0.0000
+Standard GRPO,sample_acc_rolling,27,0.0000
+Standard GRPO,sample_acc_rolling,28,0.0000
+Standard GRPO,sample_acc_rolling,29,0.0000
+Standard GRPO,sample_acc_rolling,30,0.0000
+Standard GRPO,sample_acc_rolling,31,0.2000
+Standard GRPO,sample_acc_rolling,32,0.2000
+Standard GRPO,sample_acc_rolling,33,0.2000
+Standard GRPO,sample_acc_rolling,34,0.2000
+Standard GRPO,sample_acc_rolling,35,0.4000
+Standard GRPO,sample_acc_rolling,36,0.2000
+Standard GRPO,sample_acc_rolling,37,0.2000
+Standard GRPO,sample_acc_rolling,38,0.2000
+Standard GRPO,sample_acc_rolling,39,0.4000
+Standard GRPO,sample_acc_rolling,40,0.2000
+Standard GRPO,sample_acc_rolling,41,0.2000
+Standard GRPO,sample_acc_rolling,42,0.2000
+Standard GRPO,sample_acc_rolling,43,0.4000
+Standard GRPO,sample_acc_rolling,44,0.2000
+Standard GRPO,sample_acc_rolling,45,0.4000
+Standard GRPO,sample_acc_rolling,46,0.4000
+Standard GRPO,sample_acc_rolling,47,0.4000
+Standard GRPO,eval_aime,0,-0.770833
+Standard GRPO,eval_aime,19,0.066667

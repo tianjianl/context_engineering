@@ -26,6 +26,8 @@ except ImportError:
     print("Error: google-genai not installed. Install with: pip install google-genai")
     sys.exit(1)
 
+from inference.data_utils import load_jsonl, get_solution_text
+
 
 GRADING_PROMPT = """\
 Carefully analyze the given problem statement and the proposed solution, and then write \
@@ -41,37 +43,6 @@ partial, almost, or correct.
 Problem:{problem} Solution:{solution}"""
 
 VALID_LABELS = {"incorrect", "partial", "almost", "correct"}
-
-
-def load_jsonl(file_path: str) -> list:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
-
-def get_solution_text(sample: dict) -> str:
-    """Extract the generated solution text from a sample."""
-    rounds = sample.get("rounds", [])
-    if rounds:
-        last_round = rounds[-1]
-        text = last_round.get("current_round_generation", "")
-        if text:
-            refined = sample.get("final_refined_context", "")
-            if refined:
-                return refined + "\n\n" + text
-            return text
-
-    for key in ["full_assistant_message", "final_refined_context", "generation"]:
-        text = sample.get(key, "")
-        if text and text.strip():
-            return text
-
-    return ""
 
 
 def get_solution_for_round(sample: dict, round_idx: int) -> str:

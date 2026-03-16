@@ -260,6 +260,12 @@ class RolloutManager:
         if samples[0].metadata and "raw_reward" in samples[0].metadata:
             train_data["raw_reward"] = [sample.metadata["raw_reward"] for sample in samples]
 
+        # Propagate per-component reward fields from custom reward functions
+        reward_component_keys = ["correctness_reward", "tool_bonus", "format_penalty", "used_tool", "num_tool_calls"]
+        for comp_key in reward_component_keys:
+            if hasattr(samples[0], "reward") and isinstance(samples[0].reward, dict) and comp_key in samples[0].reward:
+                train_data[comp_key] = [sample.reward[comp_key] for sample in samples]
+
         # For rollout buffer
         if samples[0].metadata and "round_number" in samples[0].metadata:
             train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
@@ -319,6 +325,11 @@ class RolloutManager:
                 "rollout_routed_experts",
                 "prompt",
                 "teacher_log_probs",
+                "correctness_reward",
+                "tool_bonus",
+                "format_penalty",
+                "used_tool",
+                "num_tool_calls",
             ]:
                 if key not in data:
                     continue

@@ -39,119 +39,138 @@ The tool **actively hurts accuracy** under the current RL setup. The model is ra
 - orphan closing tags: 14%
 - think_tag_bleed: 5%
 
-## Root Cause: Three Gaps Between RC User and RL
+## Root Cause Analysis (updated Mar 12)
 
-### Gap 1: Continuation context is degraded
+### Three Gaps Between RC User and RL
 
-RC user gives a **fresh structured prompt** with explicit improvement strategies:
-```
-If a summary of a previous attempt is provided, your task is to improve upon this attempt.
-Some strategies you could use include:
-- Verifying the previous solution.
-- Proving the result in a different way.
-- Finding alternative problem-solving strategies.
-- Continuing from where the previous solution left off.
-```
+**Gap 1: Continuation context is degraded** — RC user gives rich structured prompts with improvement strategies; RL gives terse `<tool_response>` wrapper. → Fixed in Step 1 (prompt port).
 
-RL gives a terse `<tool_response>` wrapper with:
-```
-Continue solving the problem, improving upon the summary above.
-You may verify previous conclusions, try a different approach, or build on the progress so far.
-```
+**Gap 2: Summarization prompt is weaker** — RC user's 10-line prompt vs RL's 4-line version. → Fixed in Step 1 (prompt port). Step 1b confirmed summarizer quality is NOT a bottleneck (+0.75% with API vs self).
 
-The model gets much less guidance after a tool call in RL than in RC user.
+**Gap 3: No warmstart for "when to call"** — RL expects the model to learn tool-call timing from scratch, but GRPO can't provide signal because:
 
-### Gap 2: Summarization prompt is weaker
+### Why RL alone can't learn tool-call timing (Mar 12 analysis)
 
-RC user's summarization prompt (10 lines) explicitly guides: "detailed overview," "relationship between solutions," "theorems used," "retain important information from existing summary." RL version (4 lines) is terse. Same 4B model, less guidance → worse summaries.
+Analysis of rollout 9 from job 1149793 (no bonus, 20h training):
 
-### Gap 3: No warmstart for "when to call"
+1. **89-91% of tool calls come AFTER `\boxed{answer}`** — the model solves first, then appends tool calls as afterthoughts. This makes tool calls **reward-neutral**: correct+tool = +1, correct+no-tool = +1, same GRPO advantage.
 
-RC user forces refinement. RL expects the model to learn from scratch when to emit `<tool_call>` — but the reward signal is too noisy (tool hurts accuracy → negative signal for calling). Chicken-and-egg: can't learn when to call a tool that doesn't help; tool doesn't help because the context is degraded.
+2. **Difficulty is not the bottleneck.** Group-level stats show 57% of groups are mixed (learnable signal exists), and 50/256 groups (20%) have the ideal setup (tool+correct AND notool+wrong in same group).
+
+3. **But of those 50 "ideal" groups, only 4 called tool proactively (before `\boxed`).** The other 46 are spurious correlation — model happened to get it right AND called tool after.
+
+4. **Net signal: 4/256 groups (1.6%) have genuine proactive tool-call signal** — far too sparse for GRPO to learn from. This is why the SFT warmstart is essential.
 
 ## Plan
 
-### Step 1: Close the prompt gap
+### Step 1: Close the prompt gap — ✅ DONE
 
-Port RC user prompts into the RL pipeline. No retraining, just prompt changes.
+Ported RC user prompts into `training/tool_refinement_rl/prompts.py`:
+1. ✅ Replaced `SYSTEM_PROMPT` with clearer trigger ("call when you have completed a full attempt or are stuck")
+2. ✅ Replaced `CONTINUATION_INSTRUCTIONS` with RC user's 5-bullet strategy list
+3. ✅ Replaced `create_summarization_prompt` with RC user's rich 10-line version
 
-**Changes to `training/tool_refinement_rl/prompts.py`:**
+**RL jobs with updated prompts (completed):**
 
-1. **Replace `SYSTEM_PROMPT`**: Instead of "call after each major reasoning step" (too vague), use a clearer trigger:
-   ```
-   You are a mathematical reasoning assistant. You have a tool `llm_refine` that
-   summarizes your work so far and gives you a fresh context to continue.
-   Call it when you have completed a full solution attempt and want to verify
-   or improve it, or when you are stuck and want to try a different approach.
-   Do NOT call it before you have done substantial reasoning.
-   Present your final answer using \boxed{} notation.
-   ```
+| Job ID | Config | AIME Step 0 → Best | Status |
+|--------|--------|---------------------|--------|
+| 1149793 | No tool bonus | 8.3% → 23.8% | ✅ Done (54 rollouts) |
+| 1149796 | Per-call bonus (0.15/call, cap 0.5) | 9.5% → 47.8% | ✅ Done (47 rollouts) |
 
-2. **Replace `CONTINUATION_INSTRUCTIONS`** with RC user's `### INSTRUCTIONS` block:
-   ```
-   If a summary of a previous attempt is provided, your task is to improve
-   upon this attempt. You should rely on this summary to guide your thinking.
-   Some strategies you could use include:
-   - Verifying the previous solution.
-   - Proving the result in a different way.
-   - Finding alternative problem-solving strategies.
-   - Continuing from where the previous solution left off.
-   Return your final answer in \boxed{}.
-   ```
+**Conclusion:** Per-call bonus is the strongest RL config from base model. But tool calling is still post-`\boxed` afterthoughts, not proactive. SFT warmstart needed.
 
-3. **Replace `create_summarization_prompt`** with RC user's richer version (the 10-line prompt from `rc/inference/prompts/summarization_prompt.txt`).
+### Step 1b: Summarizer quality ablation — ✅ COMPLETE
 
-**Validation**: Run RL job with updated prompts, compare tool accuracy gap. If tool-using rollouts improve from 27% toward baseline, the prompt gap was a major factor.
+| Round | Self (Qwen3-4B) | API (Gemini 2.5 Flash) | Delta |
+|-------|-----------------|----------------------|-------|
+| 1 | 35.44% | 35.69% | +0.25% |
+| 2 | 38.94% | 38.88% | -0.06% |
+| 3 | 40.12% | 41.44% | +1.32% |
+| 4 | 40.94% | 41.69% | +0.75% |
 
-### Step 2: SFT warmstart from RC user data
+**Conclusion: Summarizer quality is NOT the bottleneck.**
 
-Generate training data that teaches the model both the tool-calling format and **when** to call.
+### Step 2: SFT warmstart from RC user data — ✅ COMPLETE
 
-1. **Generate RC user rollouts** on ~1000 hard problems (pass@1 < 50% from dapo-math-17k). Run forced 2-4 step RC pipeline. GPU job.
+**Pipeline:**
+1. ✅ Sample hard problems from `polaris_filtered_removed_all_correct` (38K total)
+2. ✅ Run 4-step RC user rollouts (n=4 samples/problem) — batch 1 (2K) + batch 2 (2K)
+3. ✅ Gemini annotation via OpenRouter
+4. ✅ Build SFT dataset: `scripts/build_rc_annotated_sft.py`
+5. ✅ Batch 3 (16K problems, n=16, rejection sampling) — in progress
 
-2. **Grade each step**: Check if step N's \boxed{} answer is correct when step N-1's was wrong. These are "refinement helped" examples.
+### Step 2b: SFT training — ✅ COMPLETE
 
-3. **Convert to tool-calling format**:
-   - **Positive examples** (refinement helped): First attempt → `<tool_call>` → summary as `<tool_response>` → improved solution with correct answer
-   - **Negative examples** (solved on step 1): Single-turn solution, no tool call
-   - Target mix: ~50/50 tool-use vs no-tool-use
+**Two SFT runs completed:**
 
-4. **SFT** on this dataset using LLaMA-Factory. This teaches format + decision boundary simultaneously.
+| Job ID | Template | Train Loss | Eval Loss | Status |
+|--------|----------|------------|-----------|--------|
+| 1151857 | `qwen3` (broken) | 0.1634 | 0.1613 | ✅ Done, 3 epochs, 126 steps |
+| 1152164 | `qwen3_nothink` (fixed) | 0.1523 | 0.1577 | ✅ Done, 3 epochs, 156 steps |
 
-**Compute**: RC inference ~4 GPU-hours (H200), SFT ~2 GPU-hours.
+**Critical finding:** The `qwen3` template injects empty `<think>\n\n</think>\n\n` into every assistant turn during training (since SFT data has no think tags). This corrupted the model's token distribution, causing garbage outputs and degraded reasoning. Fix: `qwen3_nothink` template.
 
-### Step 3: RL from SFT checkpoint
+**HMMT eval results (pass@1, n=16, 12-round tool refinement):**
 
-Start RL from the SFT checkpoint with these changes:
+| Model | HMMT Feb | HMMT Nov | Avg |
+|-------|----------|----------|-----|
+| Base (Qwen3-4B-Instruct-2507) | 29.58% | 38.54% | 34.06% |
+| Old template SFT Step 30 | 10.00% | 16.04% | 13.02% |
+| Old template SFT Final | 22.08% | 30.83% | 26.46% |
+| **Nothink SFT Step 30** | 29.17% | 42.29% | 35.73% |
+| **Nothink SFT Final** | **32.29%** | **44.79%** | **38.54%** |
 
-1. **Remove all tool bonuses**: Set `TOOL_BONUS_CORRECT=0`, `TOOL_BONUS_WRONG=0`, `TOOL_BONUS_PER_CALL=0`. The SFT model already knows when to call. Let pure correctness (+1/-1) drive the learning — GRPO will reinforce tool calls that improve answers and suppress ones that don't.
+**Conclusion:** Nothink SFT final improves over base by +4.5% avg on HMMT. Tool call count increased from 92 (step 30) to 246 (final), showing SFT teaches the model to use tools more. This is the best checkpoint for RL.
 
-2. **Curriculum filtering**: Only train on problems where base model pass@8 is 10-70%. Too easy → tool unnecessary. Too hard → tool can't help either.
+### Step 3: RL from SFT checkpoint — ⏳ RUNNING
 
-3. **Keep format penalties** at current levels to suppress garbage tokens.
+Starting RL from nothink SFT final checkpoint. Three bonus ablations on H200.
 
-**Hypothesis**: With a proper SFT warmstart and no artificial bonuses, GRPO's within-group normalization will naturally teach the model to call the tool on hard problems (where tool-using rollouts score higher) and skip it on easy problems.
+| Job ID | Config | Status |
+|--------|--------|--------|
+| 1158888 | convert_nothink (HF→torch_dist) | ✅ Running |
+| 1158889 | No tool bonus — pure correctness | ⏳ Pending (afterok:1158888) |
+| 1158890 | Fixed binary bonus (correct+0.3, wrong+0.5) | ⏳ Pending (afterok:1158888) |
+| 1158891 | Per-call bonus (0.15/call, cap 0.5) | ⏳ Pending (afterok:1158888) |
 
-### Step 4: Summarizer quality (if needed)
+**Hypothesis:** With the SFT warmstart teaching proactive tool calling, the GRPO signal should be much stronger than from base model. Per-call bonus was best from base (9.5% → 47.8%), but the SFT model may not need the bonus since it already knows when to call.
 
-If Step 1's prompt improvements don't close the summarizer quality gap:
+**What to watch:**
+- Do tool calls happen BEFORE `\boxed` answers? (SFT should fix the post-answer problem)
+- Does tool-using accuracy match or exceed no-tool accuracy?
+- Which bonus config converges fastest?
 
-- **Option A**: Snapshot the model before RL, use it as a frozen summarizer. Prevents summarizer degradation during policy updates.
-- **Option B**: Use a stronger external model (Qwen3-32B or API) for summarization during RL rollouts. More expensive but guarantees summary quality.
+### Step 3b: Batch 3 data synthesis — ⏳ IN PROGRESS
 
-Only pursue if Step 1 + Step 2 show that summarizer quality is still the bottleneck.
+Large-scale data generation: 16K problems × n=16 = 256K trajectories. Rejection sampling (no Gemini annotation).
+
+| Shard | Job ID | Status |
+|-------|--------|--------|
+| s0 (0-1999) | 1151572 | ✅ Done |
+| s1 (2000-3999) | 1152144 | ⏳ Pending (MaxGRESPerAccount) |
+| s2 (4000-5999) | 1151574 | ✅ Running, step 3/4 |
+| s3 (6000-7999) | 1151575 | ✅ Running on c001 |
+| s4-s7 | 1151576-1151579 | ⏳ Pending |
+| filter | 1151580 | ⏳ Pending (after all shards) |
+
+### Step 4: Summarizer quality — ❌ NOT NEEDED
+
+Step 1b showed API summarizer gives only +0.75% over self-summarization. Eliminated.
 
 ## Execution Timeline
 
-| Step | Depends on | Estimated time | Compute |
-|------|------------|----------------|---------|
-| 1. Prompt gap fix | — | 1 day | 1 RL job (A100 8-GPU, ~24h) |
-| 2. SFT warmstart data | — (parallel with 1) | 1-2 days | RC inference (H200 4-GPU, ~4h) + grading (CPU) + SFT (H200, ~2h) |
-| 3. RL from SFT | Steps 1 + 2 | 2-3 days | 1 RL job (A100 8-GPU, ~48h) |
-| 4. Summarizer fix | Only if 1-3 insufficient | 1 day | varies |
+| Step | Status | Next action |
+|------|--------|-------------|
+| 1. Prompt gap fix | ✅ Done | Confirmed prompt fix alone can't teach tool timing |
+| 1b. Summarizer ablation | ✅ Done | **Not a bottleneck** — API only +0.75% over self |
+| 2. SFT data generation | ✅ Batch 1+2 done, ⏳ Batch 3 | Wait for batch 3 shards to finish |
+| 2b. SFT training | ✅ Done | Nothink SFT final is best checkpoint (+4.5% HMMT avg) |
+| 3. RL from SFT | ⏳ Running | Monitor 3 bonus ablations (1158889-1158891) |
+| 4. Summarizer fix | ❌ Not needed | Eliminated by Step 1b |
 
 ## Success Metrics
 
-- **Primary**: Tool-using rollouts achieve accuracy >= no-tool rollouts (currently 27% vs 64%)
+- **Primary**: Tool-using rollouts achieve accuracy >= no-tool rollouts (was 38% vs 42% in base RL)
+- **SFT milestone**: ✅ HMMT accuracy with tool refinement > baseline at nothink SFT final
 - **Secondary**: Model calls tool on 20-50% of problems (selective, not always/never)
 - **Target**: Match or exceed RC user's +5.2% gain on IMOBench, but autonomously

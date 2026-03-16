@@ -197,7 +197,7 @@ def check_has_nvlink():
     return int(output) > 0
 
 
-def get_default_wandb_args(test_file: str, run_name_prefix: str | None = None, run_id: str | None = None):
+def get_default_wandb_args(test_file: str, run_name_prefix: str | None = None, run_id: str | None = None, wandb_project: str | None = None):
     if not os.environ.get("WANDB_API_KEY"):
         print("Skip wandb configuration since WANDB_API_KEY is not found")
         return ""
@@ -214,9 +214,10 @@ def get_default_wandb_args(test_file: str, run_name_prefix: str | None = None, r
         wandb_run_name = f"{x}_{wandb_run_name}"
 
     # do not put wandb_api_key value here to avoid leaking to logs explicitly
+    project = wandb_project or "slime-run_dapo_h200"
     return (
         "--use-wandb "
-        f"--wandb-project slime-{test_name} "
+        f"--wandb-project {project} "
         f"--wandb-group {wandb_run_name} "
         f"--wandb-key ${{WANDB_API_KEY}} "
         "--disable-wandb-random-suffix "

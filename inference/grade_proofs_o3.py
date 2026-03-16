@@ -37,6 +37,11 @@ except ImportError:
     print("Error: openai not installed. Install with: pip install openai")
     sys.exit(1)
 
+from inference.data_utils import (
+    load_jsonl, get_solution_text, detect_format,
+    load_problem_metadata, load_existing_results,
+)
+
 
 # ── Categorical grading prompt (ProofBench-60 style) ────────────────────────
 
@@ -96,55 +101,6 @@ def load_rubric_prompt() -> str:
         print(f"Error: Grading prompt not found at {prompt_path}")
         sys.exit(1)
     return prompt_path.read_text(encoding="utf-8")
-
-
-def load_jsonl(file_path: str) -> List[Dict]:
-    """Load data from a JSONL file."""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data.append(json.loads(line))
-    return data
-
-
-def load_problem_metadata(metadata_file: str) -> Dict[str, Dict]:
-    """Load problem metadata keyed by prompt text (for baseline matching)."""
-    metadata = {}
-    data = load_jsonl(metadata_file)
-    for item in data:
-        prompt = item.get("prompt", "").strip()
-        if prompt and prompt not in metadata:
-            metadata[prompt] = {
-                "marking_scheme":      item.get("marking_scheme", ""),
-                "reference_solution":  item.get("reference_solution", ""),
-                "grading_guidelines":  item.get("grading_guidelines", ""),
-                "solution":            item.get("solution", ""),
-                "problem_idx":         item.get("problem_idx", ""),
-                "problem_type":        item.get("problem_type", []),
-            }
-    return metadata
-
-
-def get_solution_text(sample: Dict) -> str:
-    """Extract the generated solution text from a sample."""
-    rounds = sample.get("rounds", [])
-    if rounds:
-        last_round = rounds[-1]
-        text = last_round.get("current_round_generation", "")
-        if text:
-            refined = sample.get("final_refined_context", "")
-            if refined:
-                return refined + "\n\n" + text
-            return text
-
-    for key in ["full_assistant_message", "final_refined_context", "generation"]:
-        text = sample.get(key, "")
-        if text and text.strip():
-            return text
-
-    return ""
 
 
 # ── Scheme detection ─────────────────────────────────────────────────────────
@@ -283,19 +239,6 @@ def grade_solution(client: OpenAI, model: str, rubric_prompt_template: str,
     return None
 
 
-# ── Format detection ──────────────────────────────────────────────────────────
-
-def detect_format(data: List[Dict]) -> str:
-    if not data:
-        return "unknown"
-    first = data[0]
-    if "samples" in first:
-        return "refinement"
-    if "generation" in first:
-        return "baseline"
-    return "unknown"
-
-
 # ── Task collection ───────────────────────────────────────────────────────────
 
 def collect_tasks_refinement(inference_data: List[Dict], max_samples: int,
@@ -373,29 +316,6 @@ def collect_tasks_baseline(inference_data: List[Dict], metadata: Dict[str, Dict]
                               grading_guidelines, solution_ref, solution))
 
     return tasks, skipped
-
-
-# ── Resume support ────────────────────────────────────────────────────────────
-
-def load_existing_results(output_path: str) -> Tuple[Dict, set]:
-    existing_keys = set()
-    existing_data = {}
-    if not os.path.exists(output_path):
-        return existing_data, existing_keys
-    try:
-        data = load_jsonl(output_path)
-        for item in data:
-            line_idx = item.get("line_idx", -1)
-            for gs in item.get("graded_samples", []):
-                s_idx   = gs.get("sample_idx", 0)
-                grading = gs.get("grading")
-                if grading is not None:
-                    existing_keys.add((line_idx, s_idx))
-                    existing_data[(line_idx, s_idx)] = grading
-        print(f"  Resuming: found {len(existing_keys)} existing graded samples")
-    except Exception as e:
-        print(f"  Warning: could not load existing results: {e}")
-    return existing_data, existing_keys
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
