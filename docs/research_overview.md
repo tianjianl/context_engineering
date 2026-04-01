@@ -44,13 +44,48 @@ Contributions, in order:
 
 Without (4), the story is "autonomous doesn't work." With (4), the story becomes "the signal exists, the ceiling is high, and this is a tractable learning problem."
 
+## Oracle Ceiling Analysis
+
+Using per-round correctness data from fixed-schedule runs (RC reimpl, 12 steps, 16 samples per problem), we simulate an oracle policy that knows the optimal step to stop at for each sample.
+
+### Qwen3-4B-Instruct-2507 on IMOBench (400 problems)
+
+**Per-step pass@1 progression:**
+
+| Step | pass@1 |
+|------|--------|
+| 1 | 32.6% |
+| 4 | 37.2% |
+| 8 | 38.8% |
+| 12 | 40.0% |
+
+**Oracle vs fixed schedule:**
+
+| Policy | pass@1 | Majority Vote |
+|--------|--------|---------------|
+| No tool (step 1) | 32.6% | 23.2% |
+| Fixed 12 steps | 40.0% | 27.8% |
+| Oracle (best step per sample) | **45.9%** | **31.5%** |
+
+**The ceiling is substantial.** The oracle gains 5.9pp over fixed schedule (45.9% vs 40.0%). Of the total headroom between no-tool and oracle (13.3pp), fixed schedule captures only 56% — the remaining 44% is lost to bad timing.
+
+**Efficiency:** The early-stopping oracle achieves 45.9% while stopping at step 2.2 on average, saving 82% of compute (9.8 fewer tool calls per sample).
+
+**Regressions are the mechanism.** Across all steps: 1009 correct→wrong transitions vs 1486 wrong→correct. 40% of correctness-changing transitions are regressions caused by the tool. An oracle that avoids just these regressions captures the full ceiling.
+
+### Qwen3-30B-A3B-Instruct-2507
+
+Grading in progress (job 1226075). Cumulative pass@k results show step 1 = 46.0% → step 12 = 59.9% (pass@1), suggesting a similar or larger oracle gap.
+
 ## Current State and Next Steps
 
-**Immediate priority: establish the oracle ceiling (contribution 4).** Per-round generations from fixed-schedule runs (RC user, RC reimpl) already exist. Grading each round independently and simulating an oracle policy requires no new experiments — just analysis of existing data.
+**The oracle ceiling is real and large (contribution 4 is viable).** The remaining question is whether the signal is learnable — can a model or probe predict which steps will cause regressions?
 
-**Then:** Decide whether to pursue RL training (262K reasoning states ready, SLIME infrastructure set up) or a probe-based approach to demonstrate learnability of tool-call timing.
+**Next steps:**
+1. Complete 30B oracle analysis once grading finishes.
+2. Investigate whether a lightweight probe on reasoning state features (generation length, answer stability, repetition) can predict helpful vs harmful tool calls.
+3. Decide whether to pursue RL training (262K reasoning states ready, SLIME infrastructure set up) or focus on the probe-based learnability argument.
 
 **Open risks:**
-- Oracle ceiling may be small (fixed-schedule timing may already be close to optimal).
 - RL rollouts are expensive (2-3x single-turn RL due to sequential generation → summarization → re-generation).
 - Meta-cognition may not be learnable at small model scales — strong prompted models already fail at strategic tool use.
