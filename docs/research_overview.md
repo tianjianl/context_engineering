@@ -30,14 +30,27 @@ LMs are robust to local errors (arithmetic corruption in correct reasoning trace
 
 The summarize+refine tool's value is not fixing local errors. It is providing an exit ramp from bad strategic choices — a structured moment where the model can step back and redirect.
 
+## Possible Paper Framing
+
+Contributions, in order:
+
+1. **Formalize the distinction between fixed scaffolds and model-controlled context management.** Fixed scaffolds (call the tool every N steps) vs learned policies (model decides when to call). These are fundamentally different — one is a pipeline, the other is a capability.
+
+2. **Show fixed-schedule tool calling helps on average but hurts on specific instances.** The tool improves aggregate accuracy, but regressions on individual problems reveal that *when* you call matters as much as *whether* you call. Bad timing destroys correct solutions.
+
+3. **Show autonomous calling fails and characterize why.** Without training, models lack meta-cognition about their own reasoning state. They call reflexively, not strategically. The failure mode is well-characterized: empty calls, difficulty-independent call rates, Groundhog Day loops.
+
+4. **Show that optimal calling points exist and are predictable.** This is the critical piece. Using per-round correctness data from fixed-schedule runs, construct an oracle policy that calls the tool only when it helps. The gap between oracle and fixed-schedule accuracy establishes a ceiling — there is significant headroom for a learned policy. Optionally, show that a lightweight classifier/probe on reasoning states can predict helpful vs harmful tool calls above chance, demonstrating the signal is learnable.
+
+Without (4), the story is "autonomous doesn't work." With (4), the story becomes "the signal exists, the ceiling is high, and this is a tractable learning problem."
+
 ## Current State and Next Steps
 
-The infrastructure for RL training exists: 262K extracted reasoning states (problem + summary-so-far at each round boundary), SLIME training framework, configurable tool calls, correctness-based reward. The model would learn from outcome signal whether calling the tool at a given reasoning state leads to better answers.
+**Immediate priority: establish the oracle ceiling (contribution 4).** Per-round generations from fixed-schedule runs (RC user, RC reimpl) already exist. Grading each round independently and simulating an oracle policy requires no new experiments — just analysis of existing data.
 
-This has not launched yet for two reasons:
+**Then:** Decide whether to pursue RL training (262K reasoning states ready, SLIME infrastructure set up) or a probe-based approach to demonstrate learnability of tool-call timing.
 
-1. **Rollout cost.** Each RL episode with tool calling requires sequential generation → summarization → re-generation. This is 2-3x the cost of standard single-turn RL.
-
-2. **Feasibility uncertainty.** If strong prompted models can't use the tool strategically, it's unclear whether RL can teach this meta-cognitive capability to smaller models. The autonomous tool calling experiments suggest the gap is large.
-
-The immediate priority is completing the autonomous tool calling evaluation (baseline vs fixed-schedule vs various prompt interventions on Qwen3.5-9B) to quantify exactly how much the prompting gap is, then deciding whether to commit to the RL training.
+**Open risks:**
+- Oracle ceiling may be small (fixed-schedule timing may already be close to optimal).
+- RL rollouts are expensive (2-3x single-turn RL due to sequential generation → summarization → re-generation).
+- Meta-cognition may not be learnable at small model scales — strong prompted models already fail at strategic tool use.
