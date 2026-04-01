@@ -99,6 +99,13 @@ Best result: **52.5% pass@1** (+7.0pp over step 1) with rt2048 after 5 steps. Th
 2. Investigate whether a lightweight probe on reasoning state features (generation length, answer stability, repetition) can predict helpful vs harmful tool calls.
 3. Decide whether to pursue RL training (262K reasoning states ready, SLIME infrastructure set up) or focus on the probe-based learnability argument.
 
+**Jack's comments:**
+1. Can try more powerful model better trained to use tools (Qwen3.5, Minimax)
+2. Try search agent setting where agent reflect on whether they need to remove useless search results from their context
+3. Agree that experimenting on oracle and showing that oracle leads to improvement is a good goal
+4. Potential method after paper framing step (4): Context Compaction Companion (or buddy; CCB): use the oracle data to train a small classifier that determines when it's best to call the context compaction tool (either that classifier calls the tool directly or give a suggestion to main model)
+5. In the paper framing "**Formalize the distinction between fixed scaffolds and model-controlled context management.**", can emphasize aspects on "self-controlled context management" "model meta-cognition on context" (relates to CoT controllability!)
+
 **Open risks:**
 - RL rollouts are expensive (2-3x single-turn RL due to sequential generation → summarization → re-generation).
 - Meta-cognition may not be learnable at small model scales — strong prompted models already fail at strategic tool use.
