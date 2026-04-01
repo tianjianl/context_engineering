@@ -77,26 +77,26 @@ Using per-round correctness data from fixed-schedule runs (RC reimpl, 12 steps, 
 
 **Baseline**: 45.2% pass@1 (t32768, n16, temp=0.7)
 
-**Model-controlled tool calling improves accuracy at 30B scale.** When the model decides when to call the summarize+refine tool (rc_user), accuracy improves steadily across rounds:
+**Fixed-schedule tool calling also improves accuracy at 30B scale.** Using the RC reimpl approach (rc_user: summary embedded in user prompt, fixed tool call every round), accuracy improves steadily:
 
-| Rounds | rt2048 | rt4096 | rt8192 |
-|--------|--------|--------|--------|
-| 1      | 45.5%  | 45.1%  | 45.7%  |
-| 2      | 48.7%  | 48.9%  | —      |
-| 3      | 50.4%  | 50.3%  | 50.3%  |
-| 5      | 52.5%  | —      | —      |
+| Step | rt2048 | rt4096 | rt8192 |
+|------|--------|--------|--------|
+| 1    | 45.5%  | 45.1%  | 45.7%  |
+| 2    | 48.7%  | 48.9%  | —      |
+| 3    | 50.4%  | 50.3%  | 50.3%  |
+| 5    | 52.5%  | —      | —      |
 
-Best result: **52.5% pass@1** (+7.0pp over round 1) with rt2048 after 5 rounds. The gain is consistent across per-round token limits, with rt2048 allowing the most rounds before the model stops calling the tool.
+Best result: **52.5% pass@1** (+7.0pp over step 1) with rt2048 after 5 steps. The gain is consistent across per-round token limits.
 
-**Scaling comparison.** Both 4B and 30B benefit from the tool: 4B gains +7.4pp over 12 fixed-schedule steps (32.6% → 40.0%), 30B gains +7.0pp over 5 model-controlled rounds (45.5% → 52.5%). The 30B model achieves comparable gains in fewer rounds, suggesting more efficient tool use.
+**Scaling comparison.** Both 4B and 30B benefit from fixed-schedule tool calling: 4B gains +7.4pp over 12 steps (32.6% → 40.0%), 30B gains +7.0pp over 5 steps (45.5% → 52.5%). The 30B model achieves comparable gains in fewer steps.
 
 ## Current State and Next Steps
 
-**The oracle ceiling is real and large (contribution 4 is viable).** The 4B oracle analysis shows 5.9pp headroom over fixed schedule. The 30B model-controlled results show that the tool consistently helps at scale — the remaining question is whether a learned policy can improve further by optimizing *when* to call.
+**The oracle ceiling is real and large (contribution 4 is viable).** The 4B oracle analysis shows 5.9pp headroom over fixed schedule. The 30B fixed-schedule results confirm the tool consistently helps at scale — the remaining question is whether a learned policy can capture the oracle headroom by optimizing *when* to call.
 
 **Next steps:**
-1. Investigate whether a lightweight probe on reasoning state features (generation length, answer stability, repetition) can predict helpful vs harmful tool calls on 4B data.
-2. Characterize the 30B model's tool-use behavior: call frequency, timing, reasoning content before calls.
+1. Run oracle ceiling analysis on 30B data to quantify headroom for a learned policy.
+2. Investigate whether a lightweight probe on reasoning state features (generation length, answer stability, repetition) can predict helpful vs harmful tool calls.
 3. Decide whether to pursue RL training (262K reasoning states ready, SLIME infrastructure set up) or focus on the probe-based learnability argument.
 
 **Open risks:**
