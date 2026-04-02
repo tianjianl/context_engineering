@@ -6,6 +6,11 @@ Autoregressive generation has no backspace. Once a model commits 2000 tokens to 
 
 The overarching goal is a model that learns to call these context-management tools at the right times — compressing when the context is bloated, redirecting when the strategy is wrong, and leaving good reasoning alone.
 
+> **How does this differ from methods that tries to write a program/code that strings LM calls (e.g. [ShinkaEvolve](https://arxiv.org/pdf/2509.19349))? 
+
+> **How does this differ from [RLM](https://arxiv.org/abs/2512.24601)**?
+
+
 ## Current Focus
 
 Before giving the model multiple tools, we first need to show that a single "summarize + refine" tool works. This tool takes the model's reasoning so far, produces a compressed summary that flags what worked and what didn't, and the model continues from the cleaned context.
