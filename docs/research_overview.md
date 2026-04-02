@@ -53,6 +53,8 @@ Without (4), the story is "autonomous doesn't work." With (4), the story becomes
 
 Using per-round correctness data from fixed-schedule runs (RC reimpl, 12 steps, 16 samples per problem), we simulate an oracle policy that knows the optimal step to stop at for each sample.
 
+"The fixed-interval oracle selects the best stopping round from trajectories where the tool is called at predetermined intervals, a strict subset of all possible calling policies; any policy class that additionally optimizes when within a round to call the tool can only achieve equal or higher accuracy, making the oracle gap a lower bound on the headroom available to a learned policy."
+
 ### Qwen3-4B-Instruct-2507 on IMOBench (400 problems)
 
 **Per-step pass@1 progression:**
