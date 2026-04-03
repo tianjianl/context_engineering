@@ -103,11 +103,11 @@ All runs: n=16, temp=1.0, top_p=1.0, thinking disabled.
 
 **Autonomous tool calling confirms the failure mode at 9B scale.** Without training, the model calls the tool reflexively — 93% of tool calls are empty (no reasoning before calling), and 51.6% of samples get stuck in Groundhog Day loops (repeated summarizations with 3.9% accuracy). The tool call rate is ~74% regardless of problem difficulty.
 
-| Condition | pass@1 | pass@16 |
-|-----------|--------|---------|
-| Autonomous (5 rounds, no last-round forcing) | 25.0% | 68.8% |
-| Clean first round (autonomous, 5 rounds) | 32.6% | 70.5% |
-| Autonomous + last-round forcing (12 rounds) | 37.8% | 71.2% |
+| Condition | pass@1 | pass@16 | Tokens Used |
+|-----------|--------|---------| ------------ |
+| baseline | 25.0% | 58.6 %| 16k|
+| Autonomous + last-round forcing (12 rounds) | 37.8% | 71.2% | 16k*5 | 
+| Reasoning Cache (12 rounds) | 35.5% | 68.4% | 16k*12 |
 
 **Key observations:**
 
