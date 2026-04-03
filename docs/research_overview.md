@@ -97,6 +97,28 @@ Best result: **52.5% pass@1** (+7.0pp over step 1) with rt2048 after 5 steps. Th
 
 **Scaling comparison.** Both 4B and 30B benefit from fixed-schedule tool calling: 4B gains +7.4pp over 12 steps (32.6% → 40.0%), 30B gains +7.0pp over 5 steps (45.5% → 52.5%). The 30B model achieves comparable gains in fewer steps.
 
+### Qwen3.5-9B on IMOBench v2 (400 problems)
+
+All runs: n=16, temp=1.0, top_p=1.0, thinking disabled.
+
+**Autonomous tool calling confirms the failure mode at 9B scale.** Without training, the model calls the tool reflexively — 93% of tool calls are empty (no reasoning before calling), and 51.6% of samples get stuck in Groundhog Day loops (repeated summarizations with 3.9% accuracy). The tool call rate is ~74% regardless of problem difficulty.
+
+| Condition | pass@1 | pass@16 |
+|-----------|--------|---------|
+| Autonomous (5 rounds, no last-round forcing) | 25.0% | 68.8% |
+| Clean first round (autonomous, 5 rounds) | 32.6% | 70.5% |
+| Autonomous + last-round forcing (12 rounds) | 37.8% | 71.2% |
+
+**Key observations:**
+
+1. **Reflexive calling destroys accuracy.** The autonomous condition (25.0%) is far below the clean-first-round condition (32.6%), even though pass@16 is similar (~69-71%). The tool is actively hurting — the model has the same potential (pass@16) but wastes it on empty tool calls.
+
+2. **Clean first round partially recovers.** Removing tool definitions from round 0 forces the model to reason first. This eliminates the 93% empty-call problem on the first round and raises pass@1 from 25.0% to 32.6%.
+
+3. **Last-round forcing further improves.** Removing tools on the final round and forcing a \boxed{} answer yields 37.8% pass@1 over 12 rounds. The large jump at the final round (from ~5% per-round accuracy to 45.6%) shows the model accumulates useful context across rounds but doesn't commit to answers unless forced.
+
+4. **RC reimpl (forced tool calling) results pending** — job 1232695 still running.
+
 ## Current State and Next Steps
 
 **The oracle ceiling is real and large (contribution 4 is viable).** The 4B oracle analysis shows 5.9pp headroom over fixed schedule. The 30B fixed-schedule results confirm the tool consistently helps at scale — the remaining question is whether a learned policy can capture the oracle headroom by optimizing *when* to call.
