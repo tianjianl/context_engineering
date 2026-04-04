@@ -16,8 +16,8 @@ try:
     MATH_VERIFY_AVAILABLE = True
 except ImportError:
     MATH_VERIFY_AVAILABLE = False
-    print("Error: math-verify not installed. Install with: pip install 'math-verify[antlr4_13_2]'")
-    exit(1)
+    parse = None
+    verify = None
 
 
 def _pool_init():
@@ -66,6 +66,8 @@ def verify_batch(items: List[Tuple[str, str]],
     """
     if not items:
         return []
+    if not MATH_VERIFY_AVAILABLE:
+        raise ImportError("math-verify not installed. Install with: pip install 'math-verify[antlr4_13_2]'")
 
     if num_workers is None:
         num_workers = max(1, multiprocessing.cpu_count() - 1)

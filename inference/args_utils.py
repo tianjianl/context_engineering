@@ -8,12 +8,12 @@ def add_common_args(parser):
           --output_file, --num_samples, --temperature, --top_p, --top_k
     """
     parser.add_argument(
-        "--dataset", type=str, choices=["hmmt", "imobench"], required=True,
-        help="Dataset to use: 'hmmt' or 'imobench'"
+        "--dataset", type=str, choices=["hmmt", "imobench", "imobench_v2", "constory"], required=True,
+        help="Dataset to use: 'hmmt', 'imobench', 'imobench_v2', or 'constory'"
     )
     parser.add_argument(
         "--input_file", type=str, default=None,
-        help="Input JSONL file (required for hmmt, optional for imobench)"
+        help="Input file (required for hmmt/constory, optional for imobench)"
     )
     parser.add_argument(
         "--cache_dir", type=str,
@@ -21,7 +21,7 @@ def add_common_args(parser):
         help="Directory to cache downloaded datasets"
     )
     parser.add_argument(
-        "--model", type=str, default="Qwen/Qwen3-4B",
+        "--model", type=str, default="Qwen/Qwen3-4B-Instruct-2507",
         help="Model name or path to use for generation"
     )
     parser.add_argument(
@@ -152,3 +152,5 @@ def validate_args(args, parser):
     """
     if args.dataset == "hmmt" and args.input_file is None:
         parser.error("--input_file is required when using --dataset hmmt")
+    if args.dataset == "constory" and args.input_file is None:
+        parser.error("--input_file is required when using --dataset constory")

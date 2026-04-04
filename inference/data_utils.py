@@ -9,6 +9,45 @@ from typing import Dict, List, Optional, Tuple
 
 # Dataset URLs
 IMOBENCH_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench.csv"
+IMOBENCH_V2_URL = "https://raw.githubusercontent.com/google-deepmind/superhuman/main/imobench/answerbench_v2.csv"
+
+
+# ── Shared prompts ──────────────────────────────────────────────────────────
+
+RC_USER_REASONING_PROMPT = """You are given a maths problem. You may also be given a summary of a previous attempt to solve it. This previous attempt may or may not be correct.
+
+### PROBLEM
+{problem}
+
+### SUMMARY OF PREVIOUS ATTEMPT
+{summary}
+
+### INSTRUCTIONS
+If no summary of a previous attempt is provided, solve the problem from scratch.
+
+If a summary of a previous attempt is provided, your task is to improve upon this attempt. You should rely on this summary to guide your thinking.
+Some strategies you could use include:
+- Verifying the previous solution.
+- Proving the result in a different way.
+- Finding alternative problem-solving strategies.
+- Continuing from where the previous solution left off, assuming that the previous solution is incomplete.
+
+Reason step-by-step and return your final answer in \\boxed{{}}."""
+
+MATH_PROMPT_TEMPLATE = (
+    "Solve the following math problem. Show your reasoning step by step "
+    "and provide your final answer in \\boxed{{}}.\n\n"
+    "Problem: {problem}"
+)
+
+CRITIQUE_PROMPT = (
+    "Review your solution step by step. Check each calculation and logical step."
+)
+
+REVISE_PROMPT = (
+    "Based on your review, write your final solution. "
+    "Provide your answer in \\boxed{}."
+)
 
 
 # ── JSONL I/O ────────────────────────────────────────────────────────────────
@@ -32,19 +71,55 @@ def save_jsonl(data: List[Dict], file_path: str, mode: str = 'w') -> None:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
 
+# ── Filtering by correctness ─────────────────────────────────────────────────
+
+def _filter_by_correctness(data: List[Dict], keep_correct: bool) -> List[Dict]:
+    """Filter items by whether their baseline generation is correct/incorrect."""
+    from inference.verify_utils import verify_batch
+    items_to_verify = []
+    for item in data:
+        gold = item.get("answer", "")
+        gen = item.get("generation", "")
+        text = strip_thinking(gen) if gen else ""
+        items_to_verify.append((gold, text))
+
+    results = verify_batch(items_to_verify)
+    return [
+        item for item, (is_correct, _, _) in zip(data, results)
+        if is_correct == keep_correct
+    ]
+
+
+def filter_incorrect(data: List[Dict]) -> List[Dict]:
+    """Return only items whose baseline generation is incorrect."""
+    return _filter_by_correctness(data, keep_correct=False)
+
+
+def filter_correct(data: List[Dict]) -> List[Dict]:
+    """Return only items whose baseline generation is correct."""
+    return _filter_by_correctness(data, keep_correct=True)
+
+
 # ── IMOBench / dataset loading ───────────────────────────────────────────────
 
-def download_imobench(cache_dir: str) -> str:
-    """Download IMOBench (AnswerBench) CSV if not already cached."""
-    cache_path = Path(cache_dir) / "answerbench.csv"
+_IMOBENCH_VARIANTS = {
+    "imobench":    (IMOBENCH_URL,    "answerbench.csv",    "IMOBench"),
+    "imobench_v2": (IMOBENCH_V2_URL, "answerbench_v2.csv", "IMOBench v2"),
+}
+
+
+def download_imobench(cache_dir: str, variant: str = "imobench") -> str:
+    """Download an IMOBench CSV variant if not already cached."""
+    url, filename, label = _IMOBENCH_VARIANTS[variant]
+    cache_path = Path(cache_dir) / filename
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     if not cache_path.exists():
-        print(f"Downloading IMOBench from {IMOBENCH_URL}...")
-        urllib.request.urlretrieve(IMOBENCH_URL, cache_path)
+        print(f"Downloading {label} from {url}...")
+        urllib.request.urlretrieve(url, cache_path)
         print(f"Saved to {cache_path}")
     else:
-        print(f"Loading IMOBench from {cache_path}")
+        print(f"Loading {label} from {cache_path}")
 
     return str(cache_path)
 
@@ -66,23 +141,50 @@ def load_imobench(csv_path: str) -> List[Dict]:
     return data
 
 
+def load_constory(parquet_path: str) -> List[Dict]:
+    """Load ConStory-Bench prompts from a parquet file.
+
+    Returns list of dicts with keys: id, language, task_type, prompt.
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise ImportError("pyarrow is required for parquet files: pip install pyarrow")
+    table = pq.read_table(parquet_path)
+    col_names = set(table.column_names)
+    if "prompt" not in col_names:
+        raise ValueError(
+            f"Parquet file {parquet_path} missing required 'prompt' column. "
+            f"Found columns: {sorted(col_names)}"
+        )
+    columns = table.to_pydict()
+    num_rows = table.num_rows
+    return [{col: columns[col][i] for col in columns} for i in range(num_rows)]
+
+
 def load_dataset(dataset: str, input_file: Optional[str] = None,
                  cache_dir: str = "/scratch/dkhasha1/tli104/imobench") -> List[Dict]:
     """Unified dataset loading dispatch.
 
     Args:
-        dataset: 'imobench' or 'hmmt'
-        input_file: Path to input file (required for hmmt, optional for imobench)
+        dataset: 'imobench', 'hmmt', or 'constory'
+        input_file: Path to input file (required for hmmt/constory, optional for imobench)
         cache_dir: Directory to cache downloaded datasets
     """
-    if dataset == "imobench":
+    if dataset in ("imobench", "imobench_v2"):
         if input_file:
             if input_file.endswith('.csv'):
                 return load_imobench(input_file)
             return load_jsonl(input_file)
-        csv_path = download_imobench(cache_dir)
+        csv_path = download_imobench(cache_dir, variant=dataset)
         return load_imobench(csv_path)
     elif dataset == "hmmt":
+        return load_jsonl(input_file)
+    elif dataset == "constory":
+        if not input_file:
+            raise ValueError("--input_file is required for constory dataset")
+        if input_file.endswith('.parquet'):
+            return load_constory(input_file)
         return load_jsonl(input_file)
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -110,11 +212,18 @@ def strip_thinking(text: str) -> str:
 
 # ── Solution text extraction ─────────────────────────────────────────────────
 
+def _is_tool_call_only(text: str) -> bool:
+    """Return True if text is just a tool call with no substantive reasoning."""
+    stripped = text.strip()
+    return stripped.startswith("<tool_call>") and len(stripped) < 500
+
+
 def get_text_from_sample(sample: Dict) -> Tuple[str, Optional[str]]:
     """Extract generated text from a sample dict. Returns (text, source_name).
 
     Used by verify_solutions.py — prioritizes last_round_generation for
     answer extraction (since refined context intentionally omits \\boxed{}).
+    Skips sources that are just a tool call (no \\boxed{} answer possible).
     """
     text_sources = []
 
@@ -132,7 +241,7 @@ def get_text_from_sample(sample: Dict) -> Tuple[str, Optional[str]]:
     ])
 
     for source_name, text in text_sources:
-        if text and text.strip():
+        if text and text.strip() and not _is_tool_call_only(text):
             return text, source_name
 
     return "", None
