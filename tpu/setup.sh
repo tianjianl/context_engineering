@@ -6,9 +6,10 @@ set -e
 
 echo "=== Installing vLLM for TPU ==="
 
-# The v2-alpha-tpuv6e runtime has PyTorch/XLA pre-installed.
-# Install vLLM with TPU support.
-pip install vllm
+# IMPORTANT: `pip install vllm` installs the CUDA build which can't detect TPU.
+# Must use `vllm-tpu` instead.
+pip uninstall -y vllm 2>/dev/null || true
+pip install vllm-tpu
 
 # Install additional dependencies
 pip install transformers accelerate math_verify
