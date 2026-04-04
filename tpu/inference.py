@@ -5,7 +5,7 @@ Baseline inference on TPU using vLLM.
 Usage:
     python -m tpu.inference \
         --dataset imobench_v2 \
-        --model Qwen/Qwen3.5-4B \
+        --model Qwen/Qwen3-4B \
         --num_tokens 16384 \
         --output_file results/tpu_qwen3.5_4b_imobench_v2.jsonl
 """
@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--input_file", type=str, default=None)
     parser.add_argument("--cache_dir", type=str, default="./data_cache",
                         help="Local directory for dataset caching (no scratch on TPU VM)")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3.5-4B")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-4B")
     parser.add_argument("--num_tokens", type=int, default=16384)
     parser.add_argument("--output_file", type=str, default="results/tpu_output.jsonl")
     parser.add_argument("--num_samples", type=int, default=1)

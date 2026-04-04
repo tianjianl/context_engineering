@@ -4,38 +4,16 @@
 #   gcloud compute tpus tpu-vm ssh tli104-v6e-8 --project=tianjian-project --zone=us-east1-d
 set -e
 
-echo "=== Installing vLLM for TPU (from source) ==="
+echo "=== Installing vLLM for TPU ==="
 
 # Clean up any existing vllm installs
 pip uninstall -y vllm vllm-tpu 2>/dev/null || true
 
-# Clone tpu-inference to get the pinned compatible vLLM commit
-if [ ! -d ~/tpu-inference ]; then
-    git clone https://github.com/vllm-project/tpu-inference.git ~/tpu-inference
-else
-    cd ~/tpu-inference && git pull
-fi
-VLLM_COMMIT_HASH="$(cat ~/tpu-inference/.buildkite/vllm_lkg.version)"
-echo "Using vLLM commit: $VLLM_COMMIT_HASH"
+# Install vllm-tpu (the TPU-specific package)
+pip install vllm-tpu
 
-# Clone vLLM at the compatible commit
-if [ ! -d ~/vllm ]; then
-    git clone https://github.com/vllm-project/vllm.git ~/vllm
-fi
-cd ~/vllm
-git fetch origin
-git checkout "$VLLM_COMMIT_HASH"
-
-# Install vLLM with TPU target
-pip install -r requirements/tpu.txt
-VLLM_TARGET_DEVICE="tpu" pip install -e . --no-build-isolation
-
-# Install tpu-inference plugin
-cd ~/tpu-inference
-pip install -e .
-
-# Install latest transformers for Qwen3.5 support
-pip install --upgrade transformers accelerate math_verify
+# Do NOT upgrade transformers — newer versions break vllm-tpu internals
+pip install math_verify
 
 echo "=== Cloning repo ==="
 if [ ! -d ~/context_engineering ]; then

@@ -6,7 +6,7 @@ cd ~/context_engineering
 
 python -m tpu.inference \
     --dataset imobench_v2 \
-    --model Qwen/Qwen3.5-4B \
+    --model Qwen/Qwen3-4B \
     --num_tokens 16384 \
     --num_samples 1 \
     --temperature 0.7 \
