@@ -9,9 +9,6 @@ echo "=== Installing vLLM for TPU (from source) ==="
 # Clean up any existing vllm installs
 pip uninstall -y vllm vllm-tpu 2>/dev/null || true
 
-# Install uv for faster installs
-pip install uv
-
 # Clone tpu-inference to get the pinned compatible vLLM commit
 if [ ! -d ~/tpu-inference ]; then
     git clone https://github.com/vllm-project/tpu-inference.git ~/tpu-inference
@@ -30,15 +27,15 @@ git fetch origin
 git checkout "$VLLM_COMMIT_HASH"
 
 # Install vLLM with TPU target
-uv pip install --system -r requirements/tpu.txt
-VLLM_TARGET_DEVICE="tpu" uv pip install --system -e .
+pip install -r requirements/tpu.txt
+VLLM_TARGET_DEVICE="tpu" pip install -e . --no-build-isolation
 
 # Install tpu-inference plugin
 cd ~/tpu-inference
-uv pip install --system -e .
+pip install -e .
 
 # Install latest transformers for Qwen3.5 support
-uv pip install --system --upgrade transformers accelerate math_verify
+pip install --upgrade transformers accelerate math_verify
 
 echo "=== Cloning repo ==="
 if [ ! -d ~/context_engineering ]; then
